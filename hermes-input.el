@@ -590,7 +590,8 @@ Substitutions are applied right-to-left to preserve byte offsets."
              (when (and msg (buffer-live-p buf))
                (with-current-buffer buf
                  (hermes-dispatch
-                  (cons :system-message (list :text msg))))))))))
+                  (cons :system-message (list :text msg))
+                  sid))))))))
      ;; Live turn → enqueue silently; the drain hook will display and
      ;; submit when the in-flight stream clears.  Optimistic commit here
      ;; would place the `* user:' heading at `point-max', which sits
