@@ -333,6 +333,12 @@ position (pending stream growing before the prompt).")
 (defvar-local hermes-comint--turns-snapshot nil
   "Last-seen `turns' vector for eq-based change detection.")
 
+(defvar-local hermes-comint--pending-snapshot nil
+  "Last-seen `pending-turns' vector for eq-based change detection.
+Comint views paint pending SYSTEM messages (slash-command output)
+themselves; this snapshot makes that idempotent across re-entrant
+refresh firings.")
+
 (defvar-local hermes-comint--stream-timer nil
   "Throttle cooldown timer for streaming repaints.")
 
@@ -636,6 +642,15 @@ state and converge to the same buffer content."
            ;; No stream activity; `turns' grew (or was loaded) → append.
            ((not (eq turns hermes-comint--turns-snapshot))
             (hermes-comint--append-new-turns state)))
+          ;; Slash-command output arrives as pending SYSTEM messages; in
+          ;; comint views nothing else drains them (the org renderer does
+          ;; it only for org buffers).  Idempotent via its own snapshot.
+          ;; Safe even mid-stream: the insert anchors at `output-end',
+          ;; which neither the ephemeral repaint (bench) nor the
+          ;; committed repaint (full viewer) rewinds past.
+          (unless (eq (hermes-state-pending-turns state)
+                      hermes-comint--pending-snapshot)
+            (hermes-comint--append-pending-system state))
           ;; Always refresh the header-line: bg / attachments / status may
           ;; have changed independent of the streaming dispatch above.
           (hermes-comint--refresh-header-line state))))))
@@ -660,6 +675,31 @@ No-op in bench mode — committed history lives in the paired org buffer."
                    do (hermes-comint--insert-turn (aref turns i) (1+ i)))
           (set-marker hermes-comint--output-end (point))))
       (setq hermes-comint--turns-snapshot turns))))
+
+(defun hermes-comint--append-pending-system (state)
+  "Append pending SYSTEM messages (slash-command output) to the buffer.
+The org renderer drains pending-turns for org buffers; comint buffers
+need their own paint.  Messages are inserted at `output-end' and the
+marker advances past them, so the next ephemeral repaint (bench) or
+committed repaint (full viewer) cannot wipe them.  Non-system pending
+messages (assistant turns) are skipped — `stream-commit' paints those."
+  (let* ((inhibit-read-only t)
+         (buffer-undo-list t)
+         (pending (hermes-state-pending-turns state))
+         (start-idx (if hermes-comint--pending-snapshot
+                        (length hermes-comint--pending-snapshot)
+                      0))
+         (total (length pending))
+         (base (length (hermes-state-turns state))))
+    (setq hermes-comint--pending-snapshot pending)
+    (when (> total start-idx)
+      (save-excursion
+        (goto-char (marker-position hermes-comint--output-end))
+        (cl-loop for i from start-idx below total
+                 do (let ((msg (aref pending i)))
+                      (when (eq (hermes-message-kind msg) 'system)
+                        (hermes-comint--insert-turn msg (+ base (1+ i)))))
+                 finally (set-marker hermes-comint--output-end (point)))))))
 
 ;;;; Streaming
 
