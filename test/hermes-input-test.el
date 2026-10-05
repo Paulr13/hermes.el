@@ -305,7 +305,7 @@ when the new session hasn't been stamped yet, and stamps it."
       (should (hermes-input--try-session-slash "/delete"))
       (should-not (hermes-input--try-session-slash "/title hi"))
       (should (equal '(hermes-stored-delete
-                       hermes-current-sessions
+                       hermes-sessions-pick-any
                        hermes-stored-resume)
                      called)))))
 

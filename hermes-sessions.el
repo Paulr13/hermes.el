@@ -135,6 +135,19 @@ parent SID (when branched), and project basename."
           (pop-to-buffer-same-window buf)
         (user-error "Session buffer is gone")))))
 
+;;;###autoload
+(defun hermes-sessions-pick-any ()
+  "Show live Hermes sessions when any exist, else stored ones.
+`/sessions' routes here: the live-buffer picker is the natural
+reading while buffers are open, but falling back to the gateway-DB
+picker (`hermes-stored-resume') keeps the slash useful in a fresh
+frame — the stored list is what the TUI's `/sessions' shows."
+  (interactive)
+  (let ((coll (hermes--current-collection)))
+    (if (car coll)
+        (call-interactively #'hermes-current-sessions)
+      (call-interactively #'hermes-stored-resume))))
+
 ;;;; Stored (gateway DB) sessions
 
 (defun hermes--stored-annot (row)

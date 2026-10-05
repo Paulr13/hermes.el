@@ -35,6 +35,7 @@
 (declare-function hermes--message-text-for-display "hermes-org-render" (msg))
 (declare-function hermes-interrupt-current-session "hermes-session" ())
 (declare-function hermes-resume-from-db "hermes-sessions" (sid))
+(declare-function hermes-sessions-pick-any "hermes-sessions" ())
 (declare-function hermes-branch-from-db "hermes-sessions" (sid))
 
 (defvar-local hermes-input--history nil
@@ -85,9 +86,9 @@ commands would otherwise be void — `call-interactively' fails with
 `wrong-type-argument commandp' and the slash silently dies."
   (when (string-match hermes-input--session-slash-re text)
     (require 'hermes-sessions)
-    (pcase (match-string 1 text)
+    (pcase (downcase (match-string 1 text))
       ("resume"   (call-interactively #'hermes-stored-resume))
-      ("sessions" (call-interactively #'hermes-current-sessions))
+      ("sessions" (call-interactively #'hermes-sessions-pick-any))
       ("delete"   (call-interactively #'hermes-stored-delete)))
     t))
 
