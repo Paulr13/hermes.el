@@ -1477,14 +1477,14 @@ With prefix ARG, always create a new session."
   (hermes--install-hooks)
   (unless (hermes-rpc-live-p) (hermes-rpc-start))
   (cond
-   ((derived-mode-p 'hermes-comint-mode)
-    (message "Already in a Hermes comint buffer"))
    (arg
     (hermes-comint--create-session
      (lambda (buf)
        (when (buffer-live-p buf)
          (pop-to-buffer-same-window buf)
          (goto-char (point-max))))))
+   ((derived-mode-p 'hermes-comint-mode)
+    (message "Already in a Hermes comint buffer"))
    ((hermes--session-exists-p)
     (let ((sid (hermes-comint--pick-session)))
       (when sid (hermes-comint--open sid))))
