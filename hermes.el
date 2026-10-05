@@ -25,6 +25,7 @@
 (require 'hermes-config)
 (require 'hermes-image)
 (require 'hermes-project)
+(require 'hermes-subagents)
 
 ;;;; Cached gateway-ready payload
 

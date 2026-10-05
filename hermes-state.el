@@ -1177,7 +1177,8 @@ branching so they don't affect reducer determinism):
                  (let* ((old-sa (aref subagents idx))
                         (new-sa (hermes--with-copy old-sa hermes-subagent-copy sa
                                   (setf (hermes-subagent-status sa) 'running
-                                        (hermes-subagent-goal sa) (or goal ""))))
+                                        (hermes-subagent-goal sa)
+                                        (or goal (hermes-subagent-goal old-sa) ""))))
                         (new-sas (copy-sequence subagents)))
                    (aset new-sas idx new-sa)
                    (hermes--with-copy state hermes-state-copy s
