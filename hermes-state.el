@@ -531,14 +531,20 @@ containment so truncated echoes are caught."
         (hermes--with-copy stream hermes-stream-copy s
           (setf (hermes-stream-segments s) new-segs))))))
 
-(defun hermes--find-tool-segment-index (segments tool-id)
-  "Return index of tool segment with matching TOOL-ID, or nil."
+(defun hermes--find-tool-segment-index (segments tool-id &optional tool-name)
+  "Return index of tool segment with matching TOOL-ID, or nil.
+With TOOL-NAME, also accept a segment whose tool NAME matches — the
+gateway's `tool.generating' payload carries no call id, so segments
+are keyed by name until a real `tool.start'/`tool.complete' (whose
+`tool_id' is the provider call id, not the name) lands."
   (cl-position-if
    (lambda (seg)
      (and (eq 'tool (hermes-segment-type seg))
           (let ((tool (hermes-segment-content seg)))
             (and (hermes-tool-p tool)
-                 (equal tool-id (hermes-tool-id tool))))))
+                 (or (equal tool-id (hermes-tool-id tool))
+                     (and tool-name
+                          (equal tool-name (hermes-tool-name tool))))))))
    segments))
 
 (defun hermes--find-subagent (subagents id)
@@ -1284,21 +1290,32 @@ branching so they don't affect reducer determinism):
                            (make-hermes-segment :type 'tool :content tool
                                                 :id (hermes--next-segment-id)))))))))))
       ("tool.start"
-       (let ((str (hermes-state-stream state))
-             (tid (hermes--get p "tool_id"))
-             (ctx (hermes--strip-ansi (hermes--get p "context")))
-             (todos-raw (hermes--get p "todos")))
+       (let* ((str (hermes-state-stream state))
+              (tid (hermes--get p "tool_id"))
+              (tname (hermes--get p "name"))
+              (ctx (hermes--strip-ansi (hermes--get p "context")))
+              (args (hermes--get p "args"))
+              ;; `context' is an 80-char preview (may be empty); the full
+              ;; command lives in the args dict — prefer it when present.
+              (cmd-arg (cl-some (lambda (k)
+                                  (let ((v (and args (hermes--get args k))))
+                                    (and (stringp v) (not (string-empty-p v)) v)))
+                                '("command" "cmd" "script" "code")))
+              (ctx-final (or (and cmd-arg (hermes--strip-ansi cmd-arg)) ctx))
+              (todos-raw (hermes--get p "todos")))
          (if (or (null str) (null tid))
              state
            (let* ((segs (hermes-stream-segments str))
-                  (idx (hermes--find-tool-segment-index segs tid)))
+                  (idx (hermes--find-tool-segment-index segs tid tname)))
              (if (null idx)
                  state
                (let* ((old-seg (aref segs idx))
                       (old-tool (hermes-segment-content old-seg))
                       (new-tool (hermes--with-copy old-tool hermes-tool-copy nt
                                   (setf (hermes-tool-status nt) 'running
-                                        (hermes-tool-context nt) ctx)
+                                        (hermes-tool-id nt) tid
+                                        (hermes-tool-context nt)
+                                        (or ctx-final (hermes-tool-context nt)))
                                   (when todos-raw
                                     (setf (hermes-tool-todos nt) todos-raw))))
                       (new-seg (hermes--with-copy old-seg hermes-segment-copy ns
@@ -1317,7 +1334,8 @@ branching so they don't affect reducer determinism):
          (if (or (null str) (null tid))
              state
            (let* ((segs (hermes-stream-segments str))
-                  (idx (hermes--find-tool-segment-index segs tid)))
+                  (idx (hermes--find-tool-segment-index
+                        segs tid (hermes--get p "name"))))
              (if (null idx)
                  state
                (let* ((old-seg (aref segs idx))

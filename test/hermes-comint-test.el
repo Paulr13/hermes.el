@@ -613,6 +613,41 @@ live-state projection, both invocations converge to the same buffer."
         (hermes-comint-tab)
         (should-not (hermes-comint-test--fold-overlay))))))
 
+(ert-deftest hermes-comint-test/tool-start-matching-generates-by-name ()
+  "Gateway reality: tool.generating has no call id (segment keyed by
+name); tool.start arrives with the provider call id + args and must
+still land.  This is the flow behind the empty \"DONE $\" heading."
+  (let* ((sid (hermes-comint-test--fresh-sid))
+         (state (hermes-comint-test--state-from-events
+                 sid
+                 (list (cons "message.start" nil)
+                       (cons "tool.generating"
+                             (hermes-comint-test--ht "name" "terminal"))
+                       (cons "tool.start"
+                             (hermes-comint-test--ht
+                              "tool_id" "call_01a10db8x"
+                              "name" "terminal"
+                              "context" ""
+                              "args" (hermes-comint-test--ht
+                                      "command" "echo real && echo flow")))
+                       (cons "tool.complete"
+                             (hermes-comint-test--ht
+                              "tool_id" "call_01a10db8x" "name" "terminal"
+                              "output" "real\nflow\n" "duration_s" 0.2))
+                       (cons "message.complete"
+                             (hermes-comint-test--ht "text" "done"))))))
+    (hermes-comint-test--with-buffer buf sid state
+      (with-current-buffer buf
+        (should (string-match-p "echo real && echo flow"
+                                (hermes-comint-test--committed-text)))
+        (goto-char (point-min))
+        (search-forward "DONE")
+        (beginning-of-line)
+        (hermes-comint-tab)
+        (let ((o (hermes-comint-test--fold-overlay)))
+          (should o)
+          (should (> (overlay-end o) (overlay-start o))))))))
+
 (ert-deftest hermes-comint-test/prompts-resolve-bench-buffer ()
   "The prompts watcher resolves bench buffers via the comint registry,
 so approval / clarify / sudo prompts surface in bench-only sessions."
