@@ -460,5 +460,107 @@ live-state projection, both invocations converge to the same buffer."
         (should (< (string-match-p "\\[image:" text)
                    (string-match-p "Hello" text)))))))
 
+;;;; TAB folding in the read-only history
+
+(defun hermes-comint-test--fold-overlay ()
+  "Return the first hermes-fold overlay in the current buffer."
+  (catch 'found
+    (dolist (o (overlays-in (point-min) (point-max)))
+      (when (overlay-get o 'hermes-fold) (throw 'found o)))))
+
+(ert-deftest hermes-comint-test/tab-on-tool-heading-folds-body ()
+  "TAB on a tool status line folds the tool body; TAB again unfolds."
+  (let* ((sid (hermes-comint-test--fresh-sid))
+         (msg (make-hermes-message
+               :kind 'assistant
+               :segments (vector
+                          (make-hermes-segment :type 'text :content "Prose before")
+                          (make-hermes-segment :type 'tool
+                                               :content (make-hermes-tool
+                                                         :id "t1" :name "Uniquetool"
+                                                         :status 'complete
+                                                         :output "secret body text")))
+               :timestamp (current-time)))
+         (state (make-hermes-state :session-id sid :turns (vector msg))))
+    (hermes-comint-test--with-buffer buf sid state
+      (with-current-buffer buf
+        (should (string-match-p "Uniquetool" (hermes-comint-test--committed-text)))
+        (goto-char (point-min))
+        (search-forward "DONE Uniquetool")
+        (beginning-of-line)
+        (hermes-comint-tab)
+        (let ((o (hermes-comint-test--fold-overlay)))
+          (should o)
+          (should (> (overlay-end o) (overlay-start o))))
+        (should (invisible-p (line-beginning-position 2)))
+        (hermes-comint-tab)
+        (should-not (hermes-comint-test--fold-overlay))
+        (should-not (invisible-p (line-beginning-position 2)))))))
+
+(ert-deftest hermes-comint-test/tab-on-turn-heading-folds-whole-turn ()
+  "TAB on a turn heading folds the whole turn; the next turn stays visible."
+  (let* ((sid (hermes-comint-test--fresh-sid))
+         (a-msg (make-hermes-message
+                 :kind 'assistant
+                 :segments (vector
+                            (make-hermes-segment :type 'text :content "Assistant answer")
+                            (make-hermes-segment :type 'tool
+                                                 :content (make-hermes-tool
+                                                           :id "t1" :name "Uniquetool"
+                                                           :status 'complete
+                                                           :output "tool output")))
+                 :timestamp (current-time)))
+         (u-msg (make-hermes-message
+                 :kind 'user
+                 :segments (vector (make-hermes-segment
+                                    :type 'text :content "Second question"))
+                 :timestamp (current-time)))
+         (state (make-hermes-state :session-id sid :turns (vector a-msg u-msg))))
+    (hermes-comint-test--with-buffer buf sid state
+      (with-current-buffer buf
+        (goto-char (point-min))
+        (search-forward "Assistant")
+        (beginning-of-line)
+        (hermes-comint-tab)
+        (let ((o (hermes-comint-test--fold-overlay)))
+          (should o)
+          ;; Heading stays visible; everything under it is hidden...
+          (should-not (invisible-p (point-min)))
+          (should (invisible-p (line-beginning-position 2)))
+          ;; ...but the following user turn is not covered.
+          (save-excursion
+            (search-forward "User")
+            (beginning-of-line)
+            (should-not (invisible-p (point)))))
+        (hermes-comint-tab)
+        (should-not (hermes-comint-test--fold-overlay))))))
+
+(ert-deftest hermes-comint-test/tab-on-body-line-creates-no-fold ()
+  "TAB on a body line inside the history does not create a fold."
+  (let* ((sid (hermes-comint-test--fresh-sid))
+         (msg (make-hermes-message
+               :kind 'assistant
+               :segments (vector (make-hermes-segment
+                                  :type 'text :content "Prose before"))
+               :timestamp (current-time)))
+         (state (make-hermes-state :session-id sid :turns (vector msg))))
+    (hermes-comint-test--with-buffer buf sid state
+      (with-current-buffer buf
+        (goto-char (point-min))
+        (search-forward "Prose before")
+        (beginning-of-line)
+        (hermes-comint-tab)
+        (should-not (hermes-comint-test--fold-overlay))))))
+
+(ert-deftest hermes-comint-test/tab-at-prompt-completes-no-fold ()
+  "TAB at the prompt runs completion and creates no fold."
+  (let* ((sid (hermes-comint-test--fresh-sid))
+         (state (make-hermes-state :session-id sid)))
+    (hermes-comint-test--with-buffer buf sid state
+      (with-current-buffer buf
+        (goto-char (point-max))
+        (hermes-comint-tab)
+        (should-not (hermes-comint-test--fold-overlay))))))
+
 (provide 'hermes-comint-test)
 ;;; hermes-comint-test.el ends here

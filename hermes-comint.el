@@ -1197,12 +1197,111 @@ calls `hermes--maybe-kill-bench' so an orphan bench gets cleaned up."
         (when (fboundp 'hermes--maybe-kill-bench)
           (hermes--maybe-kill-bench sid)))))))
 
+;;;; TAB folding — overlay folds in the read-only history
+
+(defvar hermes-comint--turn-faces
+  '(hermes-comint-face-user hermes-comint-face-assistant
+    hermes-comint-face-system)
+  "Faces of turn heading lines.")
+
+(defvar hermes-comint--foldable-faces
+  (append hermes-comint--turn-faces
+          '(hermes-comint-face-tool hermes-comint-face-tool-done
+            hermes-comint-face-tool-error hermes-comint-face-tool-running
+            hermes-comint-face-subagent))
+  "Faces whose heading lines support TAB fold toggling.")
+
+(defun hermes-comint--line-faces ()
+  "Return the face(s) at the beginning of the current line as a list."
+  (let ((faces (get-char-property (line-beginning-position) 'font-lock-face)))
+    (if (listp faces) faces (list faces))))
+
+(defun hermes-comint--line-kind ()
+  "Classify the current line for fold-extent purposes.
+Returns `turn' (a turn heading), `sub' (a tool / subagent heading),
+`body' (a display- or physically-indented block body line),
+`blank', or nil (anything else, e.g. the prompt)."
+  (let ((faces (hermes-comint--line-faces))
+        (lp (get-char-property (line-beginning-position) 'line-prefix)))
+    (cond
+     ((cl-some (lambda (f) (memq f hermes-comint--foldable-faces)) faces)
+      (if (cl-some (lambda (f) (memq f hermes-comint--turn-faces)) faces)
+          'turn 'sub))
+     ((and (stringp lp) (> (length lp) 0)) 'body)
+     ((save-excursion (goto-char (line-beginning-position))
+                      (looking-at-p "[ \t]")) 'body)
+     ((save-excursion (goto-char (line-beginning-position))
+                      (looking-at-p "[ \t]*$")) 'blank))))
+
+(defun hermes-comint--fold-block-end (&optional turn-p)
+  "Return the end of the block headed by the current line.
+With TURN-P, fold the whole turn: scan over child headings, bodies
+and the single blank separators between segments, stopping at the
+next turn heading, the prompt or two consecutive blanks.  Without
+it, fold only this child heading's contiguous body lines (a blank
+line ends the block).  Returns the end of the heading line itself
+when there is nothing to fold."
+  (save-excursion
+    (end-of-line)
+    (let ((end (point)) (stop nil))
+      (while (and (not stop) (not (eobp)))
+        (forward-line 1)
+        (pcase (hermes-comint--line-kind)
+          ((or `body `sub) (setq end (line-end-position)))
+          (`blank
+           (unless (and turn-p
+                        (save-excursion
+                          (and (not (eobp))
+                               (forward-line 1)
+                               (not (eobp))
+                               (memq (hermes-comint--line-kind) '(body sub)))))
+             (setq stop t)))
+          (_ (setq stop t))))
+      end)))
+
+(defun hermes-comint--toggle-fold ()
+  "Toggle a fold overlay over the block headed by the current line."
+  (let* ((turn-p (eq (hermes-comint--line-kind) 'turn))
+         (start (line-end-position))
+         (end (hermes-comint--fold-block-end turn-p))
+         (existing (catch 'found
+                     (dolist (o (overlays-at start))
+                       (when (overlay-get o 'hermes-fold) (throw 'found o))))))
+    (if existing
+        (delete-overlay existing)
+      (if (> end start)
+          (let ((o (make-overlay start end)))
+            (add-to-invisibility-spec '(hermes-fold . t))
+            (overlay-put o 'invisible 'hermes-fold)
+            (overlay-put o 'hermes-fold t)
+            (overlay-put o 'evaporate t)
+            (overlay-put o 'isearch-open-invisible
+                         (lambda (ov) (delete-overlay ov))))
+        (message "Nothing to fold on this line")))))
+
+(defun hermes-comint-tab ()
+  "TAB in `hermes-comint-mode'.
+At the prompt, run `completion-at-point'.  On a turn / tool /
+subagent heading in the read-only history, toggle an overlay fold
+of that block's body — real `org-cycle' folding lives in the
+paired org buffer, this mirrors it so TAB never falls through to
+`indent-for-tab-command' and errors \"Text is read-only\" in the
+history region.  Folds reset on `hermes-comint-refresh'."
+  (interactive)
+  (if (and hermes-comint--prompt-start
+           (hermes-comint--in-input-area-p))
+      (completion-at-point)
+    (if (memq (hermes-comint--line-kind) '(turn sub))
+        (hermes-comint--toggle-fold)
+      (message "TAB folds a turn / tool / subagent heading — org-cycle folding lives in the org buffer"))))
+
 ;;;; Keymap
 
 (defvar hermes-comint-mode-map
   (let ((m (make-sparse-keymap)))
     (set-keymap-parent m comint-mode-map)
     (define-key m (kbd "RET")     #'hermes-comint-send)
+    (define-key m (kbd "TAB")     #'hermes-comint-tab)
     (define-key m (kbd "C-c C-c") #'hermes-comint-send)
     (define-key m (kbd "M-p")     #'hermes-comint-previous-input)
     (define-key m (kbd "M-n")     #'hermes-comint-next-input)
