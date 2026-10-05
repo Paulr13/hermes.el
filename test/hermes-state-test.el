@@ -812,6 +812,82 @@ Gateway shape: list of hash-tables with \"content\" / \"status\" / \"id\"."
     (should tool-seg)
     (should (eq 'complete (hermes-tool-status (hermes-segment-content tool-seg))))))
 
+;;;; Sequential same-name tool calls (gateway-shaped regressions)
+
+(ert-deftest hermes-state-test/sequential-same-name-tools-stay-separate ()
+  "Two sequential `terminal' calls must stay separate segments:
+call 2's start/complete may not re-attach to call 1's finished
+segment (gateway reality: `tool.generating' carries no call id)."
+  (let* ((s (hermes-test--reduce*
+             nil
+             (cons "message.start" nil)
+             (cons "tool.generating" (hermes-test--ht "name" "terminal"))
+             (cons "tool.start" (hermes-test--ht "tool_id" "call_a" "name" "terminal"
+                                                 "args" (hermes-test--ht "command" "echo one")))
+             (cons "tool.complete" (hermes-test--ht "tool_id" "call_a" "name" "terminal"
+                                                    "output" "one"))
+             (cons "tool.generating" (hermes-test--ht "name" "terminal"))
+             (cons "tool.start" (hermes-test--ht "tool_id" "call_b" "name" "terminal"
+                                                 "args" (hermes-test--ht "command" "echo two")))
+             (cons "tool.complete" (hermes-test--ht "tool_id" "call_b" "name" "terminal"
+                                                    "output" "two"))))
+         (segs (hermes-stream-segments (hermes-state-stream s))))
+    (should (= 2 (length segs)))
+    (let ((t1 (hermes-segment-content (aref segs 0)))
+          (t2 (hermes-segment-content (aref segs 1))))
+      (should (equal "call_a" (hermes-tool-id t1)))
+      (should (eq 'complete (hermes-tool-status t1)))
+      (should (equal "echo one" (hermes-tool-context t1)))
+      (should (equal "one" (hermes-tool-output t1)))
+      (should (equal "call_b" (hermes-tool-id t2)))
+      (should (eq 'complete (hermes-tool-status t2)))
+      (should (equal "echo two" (hermes-tool-context t2)))
+      (should (equal "two" (hermes-tool-output t2))))))
+
+(ert-deftest hermes-state-test/sequential-same-name-tools-transient-gen-ids ()
+  "Gateway variant where `tool.generating' carries a transient id
+(t1/t2) distinct from the provider call ids at `tool.start'."
+  (let* ((s (hermes-test--reduce*
+             nil
+             (cons "message.start" nil)
+             (cons "tool.generating" (hermes-test--ht "tool_id" "t1" "name" "terminal"))
+             (cons "tool.start" (hermes-test--ht "tool_id" "call_a" "name" "terminal"
+                                                 "args" (hermes-test--ht "command" "echo one")))
+             (cons "tool.complete" (hermes-test--ht "tool_id" "call_a" "name" "terminal"
+                                                    "output" "one"))
+             (cons "tool.generating" (hermes-test--ht "tool_id" "t2" "name" "terminal"))
+             (cons "tool.start" (hermes-test--ht "tool_id" "call_b" "name" "terminal"
+                                                 "args" (hermes-test--ht "command" "echo two")))
+             (cons "tool.complete" (hermes-test--ht "tool_id" "call_b" "name" "terminal"
+                                                    "output" "two"))))
+         (segs (hermes-stream-segments (hermes-state-stream s))))
+    (should (= 2 (length segs)))
+    (let ((t1 (hermes-segment-content (aref segs 0)))
+          (t2 (hermes-segment-content (aref segs 1))))
+      (should (equal "call_a" (hermes-tool-id t1)))
+      (should (equal "echo one" (hermes-tool-context t1)))
+      (should (equal "one" (hermes-tool-output t1)))
+      (should (equal "call_b" (hermes-tool-id t2)))
+      (should (eq 'complete (hermes-tool-status t2)))
+      (should (equal "echo two" (hermes-tool-context t2)))
+      (should (equal "two" (hermes-tool-output t2))))))
+
+(ert-deftest hermes-state-test/tool-complete-lands-on-name-placeholder ()
+  "Regression for the earlier empty-\"DONE $\" fix: when
+`tool.start' never lands, `tool.complete' with the provider call id
+must still resolve the name-keyed placeholder."
+  (let* ((s (hermes-test--reduce*
+             nil
+             (cons "message.start" nil)
+             (cons "tool.generating" (hermes-test--ht "name" "terminal"))
+             (cons "tool.complete" (hermes-test--ht "tool_id" "call_x" "name" "terminal"
+                                                    "output" "out"))))
+         (segs (hermes-stream-segments (hermes-state-stream s)))
+         (t1 (hermes-segment-content (aref segs 0))))
+    (should (= 1 (length segs)))
+    (should (eq 'complete (hermes-tool-status t1)))
+    (should (equal "out" (hermes-tool-output t1)))))
+
 ;;;; Subagents
 
 (ert-deftest hermes-state-test/subagent-spawn-creates-queued ()

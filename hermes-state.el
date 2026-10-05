@@ -532,20 +532,34 @@ containment so truncated echoes are caught."
           (setf (hermes-stream-segments s) new-segs))))))
 
 (defun hermes--find-tool-segment-index (segments tool-id &optional tool-name)
-  "Return index of tool segment with matching TOOL-ID, or nil.
-With TOOL-NAME, also accept a segment whose tool NAME matches — the
-gateway's `tool.generating' payload carries no call id, so segments
-are keyed by name until a real `tool.start'/`tool.complete' (whose
-`tool_id' is the provider call id, not the name) lands."
-  (cl-position-if
-   (lambda (seg)
-     (and (eq 'tool (hermes-segment-type seg))
-          (let ((tool (hermes-segment-content seg)))
-            (and (hermes-tool-p tool)
-                 (or (equal tool-id (hermes-tool-id tool))
-                     (and tool-name
-                          (equal tool-name (hermes-tool-name tool))))))))
-   segments))
+  "Return index of the tool segment for TOOL-ID, or nil.
+TOOL-ID is the provider call id carried by `tool.start' and
+`tool.complete'.  With TOOL-NAME, fall back to the LAST same-name
+segment not yet finalized (status `generating' or `running'):
+gateway `tool.generating' carries no stable call id — its segment
+is keyed by name (or a transient id) until `tool.start' binds the
+real one.  Last-not-finalized (not first-any) is what keeps a
+second call of the same tool from re-attaching to the first call's
+finished segment — the \"second terminal call overwrites the
+first\" bug."
+  (or (cl-position-if
+       (lambda (seg)
+         (and (eq 'tool (hermes-segment-type seg))
+              (let ((tool (hermes-segment-content seg)))
+                (and (hermes-tool-p tool)
+                     (equal tool-id (hermes-tool-id tool))))))
+       segments)
+      (and tool-name
+           (cl-position-if
+            (lambda (seg)
+              (and (eq 'tool (hermes-segment-type seg))
+                   (let ((tool (hermes-segment-content seg)))
+                     (and (hermes-tool-p tool)
+                          (equal tool-name (hermes-tool-name tool))
+                          (memq (hermes-tool-status tool)
+                                '(generating running))))))
+            segments
+            :from-end t))))
 
 (defun hermes--find-subagent (subagents id)
   "Return index of subagent with matching ID in SUBAGENTS vector, or nil."
@@ -1372,14 +1386,12 @@ branching so they don't affect reducer determinism):
          (if (or (null str) (null tid))
              state
            (let* ((segs (hermes-stream-segments str))
-                  (tname (hermes--get p "name"))
-                  (idx (cl-position-if
-                        (lambda (seg)
-                          (and (eq 'tool (hermes-segment-type seg))
-                               (let ((tl (hermes-segment-content seg)))
-                                 (or (equal tid (hermes-tool-id tl))
-                                     (and tname (equal tname (hermes-tool-name tl)))))))
-                        segs)))
+                (tname (hermes--get p "name"))
+                ;; Same resolution rules as tool.start: id match primary,
+                ;; name fallback only to the last not-finalized segment —
+                ;; otherwise call 2's complete re-attaches to call 1's
+                ;; finished segment.
+                (idx (hermes--find-tool-segment-index segs tid tname)))
              (if (null idx)
                  state
                (let* ((old-seg (aref segs idx))
