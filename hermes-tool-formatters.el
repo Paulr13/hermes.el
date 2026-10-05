@@ -231,10 +231,12 @@ empty or nil.  The `#+name' line is placed immediately before the
                 ((string-match-p "\\`#!.*\\(node\\|deno\\)" cmd) "js")
                 (t "bash")))
          (summary
-          (concat "$ " (hermes-tool--truncate
-                        (if (string-empty-p cmd)
-                            (or (hermes-tool-context tool) "") cmd)
-                        72))))
+          (concat "$ "
+                  ;; Whole command, one-line collapsed — no truncation.
+                  (replace-regexp-in-string
+                   "[\n\r]+" " ; "
+                   (if (string-empty-p cmd)
+                       (or (hermes-tool-context tool) "") cmd)))))
     (list :summary summary
           :body (concat
                  (hermes-tool--context-block tool)
