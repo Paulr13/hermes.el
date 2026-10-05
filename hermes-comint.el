@@ -950,6 +950,41 @@ buffer."
 
 ;;;; Mode-line
 
+(defun hermes-comint--format-token-count (n)
+  "Format token count N TUI-style: 62200 → \"62.2K\", 512000 → \"512K\"."
+  (cond ((not (numberp n)) "0")
+        ((< n 1000) (format "%d" n))
+        (t (let ((k (/ n 1000.0)))
+             (if (>= k 100)
+                 (format "%.0fK" k)
+               (format "%.1fK" k))))))
+
+(defun hermes-comint--format-context-usage (usage)
+  "Return a TUI-style context readout from the USAGE snapshot hash.
+Mirrors the gateway status bar layout:
+  `~62.2K/512K │ [█░░░░░░░░░] ~12% │ ◎ 85%'
+The `~' prefixes mark values estimated by the gateway rather than
+reported by the provider.  Nil when the snapshot carries no context
+accounting (fresh session, or right after a compression)."
+  (when-let* ((used   (gethash "context_used" usage))
+              (max    (gethash "context_max" usage))
+              (pct    (gethash "context_percent" usage))
+              (est    (if (gethash "context_estimated" usage) "~" ""))
+              (bar-w  10)
+              (filled (max 0 (min bar-w
+                                  (round (/ (* (min (or pct 0) 100) bar-w)
+                                            100.0)))))
+              (bar    (concat "[" (make-string filled ?█)
+                              (make-string (- bar-w filled) ?░) "]")))
+    (let* ((segs (list (format "%s%s/%s" est
+                               (hermes-comint--format-token-count used)
+                               (hermes-comint--format-token-count max))
+                       (format "%s %s%d%%" bar est (round pct))))
+           (cache (gethash "cache_hit_pct" usage)))
+      (when (and (numberp cache) (> cache 0))
+        (setq segs (append segs (list (format "◎ %d%%" (round cache))))))
+      (string-join segs " │ "))))
+
 (defun hermes-comint--format-mode-line (state sid)
   "Return a mode-line status string for STATE and SID, or \"\"."
   (if (not state)
@@ -983,12 +1018,11 @@ buffer."
         (when-let ((st (and ui (hermes-ui-state-status-text ui))))
           (push (format " · %s" (truncate-string-to-width st 30 nil nil t))
                 parts)))
-      ;; Token usage
+      ;; Context usage — TUI-style readout (fed by `session.usage' polls
+      ;; and the `session.info' usage payload).
       (when-let* ((usage (hermes-state-usage state))
-                  (sent  (gethash "tokens_sent" usage))
-                  (recv  (gethash "tokens_received" usage)))
-        (when (or sent recv)
-          (push (format " · (%s tokens)" (+ (or sent 0) (or recv 0))) parts)))
+                  (ctx   (hermes-comint--format-context-usage usage)))
+        (push (format " · %s" ctx) parts))
       ;; Queue
       (let ((q (hermes-state-queue state)))
         (when (and q (> (length q) 0))

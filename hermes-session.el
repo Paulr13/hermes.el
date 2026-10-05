@@ -166,5 +166,49 @@ the `:hermes:' container containing point."
                (hermes-bg--list-for-sid sid))
       (user-error "No active Hermes session in this buffer"))))
 
+;;;; Context-usage polling
+
+;; The TUI polls `session.usage' every second; the Emacs client instead
+;; refreshes once per turn: after `message.complete' we fetch the
+;; usage snapshot (which carries context_used/context_max/context_percent
+;; from `_get_usage' → `context_usage_fields') and reduce it into
+;; `hermes-state-usage', where the bench mode-line renders it.
+
+(defvar hermes-session--usage-poll-timer nil
+  "Singleton timer debouncing `session.usage' polls.")
+
+(defconst hermes-session--usage-poll-delay 0.5
+  "Seconds after a completed turn before the `session.usage' poll.
+Gives the gateway time to settle its final token counters; one
+singleton timer serves all sessions (last completed turn wins).")
+
+(defun hermes-session--schedule-usage-poll (sid)
+  "Schedule a debounced `session.usage' poll for SID."
+  (when (and sid (hermes-rpc-live-p))
+    (when (timerp hermes-session--usage-poll-timer)
+      (cancel-timer hermes-session--usage-poll-timer))
+    (setq hermes-session--usage-poll-timer
+          (run-at-time hermes-session--usage-poll-delay nil
+                       #'hermes-session--usage-poll sid))))
+
+(defun hermes-session--usage-poll (sid)
+  "Fetch the usage snapshot for SID and reduce it into its state slot."
+  (hermes--request
+   "session.usage" (list :session_id sid)
+   (lambda (result _error)
+     (when (hash-table-p result)
+       (hermes-dispatch (list :usage-update :snapshot result) sid)))))
+
+;;;###autoload
+(defun hermes-usage-poll-now ()
+  "Fetch the usage snapshot for the session in the current buffer.
+Manual refresh of the context readout (also useful right after
+`/compress', which resets the gateway's context accounting)."
+  (interactive)
+  (let ((sid (car (hermes--resolve-session-target))))
+    (if sid
+        (hermes-session--usage-poll sid)
+      (user-error "No active Hermes session in this buffer"))))
+
 (provide 'hermes-session)
 ;;; hermes-session.el ends here

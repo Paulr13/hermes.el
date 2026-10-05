@@ -1436,6 +1436,33 @@ branching so they don't affect reducer determinism):
                                 :id (hermes--next-segment-id)))
                     :timestamp (current-time))))
          (hermes--push-pending state msg)))
+      (:usage-update
+       (let* ((snap (plist-get p :snapshot))
+              (old (hermes-state-usage state))
+              (merged (cond
+                       ((and (hash-table-p snap) (gethash "context_used" snap))
+                        ;; Fresh snapshot with live context accounting —
+                        ;; replace wholesale (it is the authoritative state).
+                        (copy-hash-table snap))
+                       ((and (hash-table-p snap) (hash-table-p old))
+                        ;; Context accounting absent (e.g. right after a
+                        ;; compression, when last_prompt_tokens resets to
+                        ;; the sentinel) — merge token counters but drop
+                        ;; stale context keys, so the readout shows nothing
+                        ;; instead of pre-compression numbers.
+                        (let ((u (copy-hash-table old)))
+                          (maphash (lambda (k v) (puthash k v u)) snap)
+                          (dolist (k '("context_used" "context_max"
+                                       "context_percent" "context_estimated"
+                                       "context_source"))
+                            (remhash k u))
+                          u))
+                       ((hash-table-p snap) (copy-hash-table snap))
+                       (t old))))
+         (if (eq merged old)
+             state
+           (hermes--with-copy state hermes-state-copy s
+             (setf (hermes-state-usage s) merged)))))
       (:pending-clear
        (if (hermes-state-pending state)
            (hermes--with-copy state hermes-state-copy s

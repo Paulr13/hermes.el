@@ -80,6 +80,43 @@
     (should (hash-table-p usage))
     (should (= 100 (gethash "tokens_sent" usage)))))
 
+(ert-deftest hermes-state-test/usage-update-replaces-context ()
+  "`:usage-update' with live context accounting replaces the snapshot
+wholesale (it is the authoritative state)."
+  (let* ((old (hermes-test--ht "tokens_sent" 100 "model" "opus"))
+         (s0 (make-hermes-state :usage old))
+         (snap (hermes-test--ht "context_used" 62200 "context_max" 512000
+                                "context_percent" 12.16
+                                "context_estimated" t "cache_hit_pct" 85))
+         (s1 (hermes--reduce s0 (list :usage-update :snapshot snap))))
+    (should-not (eq (hermes-state-usage s0) (hermes-state-usage s1)))
+    ;; Purity: s0 untouched.
+    (should (= 100 (gethash "tokens_sent" (hermes-state-usage s0))))
+    (should (= 62200 (gethash "context_used" (hermes-state-usage s1))))
+    (should (= 85 (gethash "cache_hit_pct" (hermes-state-usage s1))))))
+
+(ert-deftest hermes-state-test/usage-update-drops-stale-context ()
+  "A snapshot without context accounting (post-compression sentinel)
+merges tokens but drops the old context keys."
+  (let* ((old (hermes-test--ht "context_used" 62200 "context_max" 512000
+                               "context_percent" 12.16 "tokens_sent" 100))
+         (s0 (make-hermes-state :usage old))
+         (snap (hermes-test--ht "tokens_sent" 250 "tokens_received" 80))
+         (s1 (hermes--reduce s0 (list :usage-update :snapshot snap)))
+         (usage (hermes-state-usage s1)))
+    (should-not (gethash "context_used" usage))
+    (should-not (gethash "context_max" usage))
+    (should (= 250 (gethash "tokens_sent" usage)))
+    ;; Old state still intact.
+    (should (= 62200 (gethash "context_used" (hermes-state-usage s0))))))
+
+(ert-deftest hermes-state-test/usage-update-ignores-empty ()
+  "A nil/non-hash snapshot leaves the state unchanged (eq)."
+  (let* ((old (hermes-test--ht "tokens_sent" 100))
+         (s0 (make-hermes-state :usage old)))
+    (should (eq s0 (hermes--reduce s0 (list :usage-update :snapshot nil))))
+    (should (eq s0 (hermes--reduce s0 '(:usage-update))))))
+
 (ert-deftest hermes-state-test/session-info-does-not-mutate-old-hashes ()
   "Reducer purity: `session.info' must NOT mutate the old state's hashes.
 Regression for the in-place-mutation bug where `puthash' on the old

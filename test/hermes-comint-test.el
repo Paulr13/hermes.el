@@ -417,16 +417,36 @@ live-state projection, both invocations converge to the same buffer."
                             (hermes-comint--format-mode-line state sid)))))
 
 (ert-deftest hermes-comint-test/mode-line-usage ()
-  "Token counts appear in the formatted string."
+  "Context readout (TUI-style) appears when the usage hash has it;
+plain token counters alone show nothing."
   (let* ((sid "s3")
          (usage (let ((h (make-hash-table :test 'equal)))
-                  (puthash "tokens_sent" 100 h)
-                  (puthash "tokens_received" 250 h) h))
+                  (puthash "context_used" 62200 h)
+                  (puthash "context_max" 512000 h)
+                  (puthash "context_percent" 12.16 h)
+                  (puthash "context_estimated" t h)
+                  (puthash "cache_hit_pct" 85 h) h))
          (state (make-hermes-state :session-id sid
                                    :connection 'connected
                                    :usage usage)))
-    (should (string-match-p "(350 tokens)"
-                            (hermes-comint--format-mode-line state sid)))))
+    (should (string-match-p (regexp-quote "~62.2K/512K │ [█░░░░░░░░░] ~12% │ ◎ 85%")
+                            (hermes-comint--format-mode-line state sid)))
+    ;; Tokens-only snapshot (no context accounting) renders no readout.
+    (let* ((tokens (let ((h (make-hash-table :test 'equal)))
+                     (puthash "tokens_sent" 100 h)
+                     (puthash "tokens_received" 250 h) h))
+           (st2 (make-hermes-state :session-id sid
+                                   :connection 'connected
+                                   :usage tokens)))
+      (should-not (string-match-p "tokens"
+                                  (hermes-comint--format-mode-line st2 sid))))))
+
+(ert-deftest hermes-comint-test/format-token-count ()
+  "Token counts format TUI-style with K suffixes."
+  (should (equal "622" (hermes-comint--format-token-count 622)))
+  (should (equal "62.2K" (hermes-comint--format-token-count 62200)))
+  (should (equal "512K" (hermes-comint--format-token-count 512000)))
+  (should (equal "1.5K" (hermes-comint--format-token-count 1533))))
 
 (ert-deftest hermes-comint-test/mode-line-queue ()
   "Queue length appears in the formatted string."

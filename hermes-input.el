@@ -76,8 +76,15 @@ text (currently unused — the pickers ignore arguments).")
   "If TEXT is an intercepted session-management slash, dispatch it.
 Return non-nil when handled, nil otherwise.  Side effect: pops the
 appropriate `completing-read' picker.  Any user argument is ignored
-for v1 — the pickers carry the entire selection workflow."
+for v1 — the pickers carry the entire selection workflow.
+
+The hermes-sessions module is required here, not at load time:
+`hermes.el' only autoloads the `hermes' entry, so nothing registers
+the `;;;###autoload' cookies in hermes-sessions.el and the picker
+commands would otherwise be void — `call-interactively' fails with
+`wrong-type-argument commandp' and the slash silently dies."
   (when (string-match hermes-input--session-slash-re text)
+    (require 'hermes-sessions)
     (pcase (match-string 1 text)
       ("resume"   (call-interactively #'hermes-stored-resume))
       ("sessions" (call-interactively #'hermes-current-sessions))

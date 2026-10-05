@@ -43,7 +43,11 @@ without this cache, the very first session would never see the skin.")
   (cond
    ((and session-id (not (string-empty-p session-id)))
     (hermes-dispatch (cons type payload) session-id)
-    (hermes-ui-dispatch (cons type payload) session-id))
+    (hermes-ui-dispatch (cons type payload) session-id)
+    ;; A finished turn may have changed context occupancy — refresh the
+    ;; bench mode-line's TUI-style readout (debounced, singleton timer).
+    (when (equal type "message.complete")
+      (hermes-session--schedule-usage-poll session-id)))
    (t
     (hermes--broadcast-dispatch type payload))))
 
