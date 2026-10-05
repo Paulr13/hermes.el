@@ -443,6 +443,10 @@ empty or nil.  The `#+name' line is placed immediately before the
 ;;;; Registration
 
 (hermes-tool--register "\\`Bash\\'"          #'hermes-tool-format-bash)
+;; Hermes agents name their shell tool `terminal'; the Claude-style
+;; names here never match it, so terminal calls fell to the generic
+;; formatter and showed neither the command nor a foldable body.
+(hermes-tool--register "\\`terminal\\'"      #'hermes-tool-format-bash)
 (hermes-tool--register "\\`Read\\'"          #'hermes-tool-format-read)
 (hermes-tool--register "\\`\\(Edit\\|MultiEdit\\|Write\\)\\'"
                        #'hermes-tool-format-edit)

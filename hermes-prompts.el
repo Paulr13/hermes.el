@@ -21,28 +21,39 @@
   "Non-nil while a minibuffer interaction is in flight.
 Guards against re-entrant prompts when the renderer hook fires again.")
 
+(defun hermes-prompts--session-buffer (sid)
+  "Return the live viewer buffer for SID, or nil.
+Prefers the org viewer registry; falls back to the comint bench
+registry so prompts surface in whichever client is showing SID."
+  (let ((buf (or (gethash sid hermes--org-buffers)
+                 (and (boundp 'hermes-comint--buffers)
+                      (gethash sid hermes-comint--buffers)))))
+    (and (buffer-live-p buf) buf)))
+
 (defun hermes-prompts-watch (old new)
   "State-change hook: when pending becomes non-nil, schedule a prompt.
-Globally installed; resolves the target buffer via
-`hermes--org-buffers' so the buffer-local re-entry guard
-`hermes--pending-active' lives with its parent buffer."
-  (hermes--on-session-buffer hermes--org-buffers
-    (let ((op (and old (hermes-state-pending old)))
-          (np (hermes-state-pending new)))
-      (when (and np (not (eq op np)) (not hermes--pending-active))
-        (setq hermes--pending-active t)
-        (let ((buf (current-buffer))
-              (sid (hermes-state-session-id new))
-              (pending np))
-          (run-at-time
-           0 nil
-           (lambda ()
-             (when (buffer-live-p buf)
-               (with-current-buffer buf
-                 (unwind-protect
-                     (hermes--prompts-handle sid pending)
-                   (setq hermes--pending-active nil)
-                   (hermes-dispatch '(:pending-clear) sid)))))))))))
+Globally installed by the org viewer mode and the comint bench;
+resolves the target buffer via `hermes-prompts--session-buffer' so
+the buffer-local re-entry guard `hermes--pending-active' lives with
+the buffer that will run the minibuffer interaction."
+  (let ((op (and old (hermes-state-pending old)))
+        (np (hermes-state-pending new)))
+    (when (and np (not (eq op np)))
+      (let* ((sid (hermes-state-session-id new))
+             (buf (hermes-prompts--session-buffer sid)))
+        (when (and buf (not (buffer-local-value 'hermes--pending-active buf)))
+          (with-current-buffer buf
+            (setq hermes--pending-active t))
+          (let ((pending np))
+            (run-at-time
+             0 nil
+             (lambda ()
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (unwind-protect
+                       (hermes--prompts-handle sid pending)
+                     (setq hermes--pending-active nil)
+                     (hermes-dispatch '(:pending-clear) sid))))))))))))
 
 (defun hermes--prompts-handle (sid pending)
   "Run the right minibuffer prompt for PENDING and dispatch the response."

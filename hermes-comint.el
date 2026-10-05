@@ -1340,6 +1340,13 @@ Projects from the same `turns' state as the org viewer.
   (setq-local comint-scroll-show-maximum-output t)
   (visual-line-mode 1)
   (setq-local scroll-conservatively 101)
+  ;; Surface approval / clarify / sudo prompts in the bench too: the org
+  ;; viewer installs `hermes-prompts-watch' only when an org buffer
+  ;; exists, so bench-only sessions silently dropped pending approval
+  ;; requests (they timed out unanswered).  add-hook is global and
+  ;; idempotent per function, so per-buffer calls are fine.
+  (require 'hermes-prompts)
+  (add-hook 'hermes-state-change-hook #'hermes-prompts-watch t)
   (setq-local scroll-margin 0)
   (add-hook 'pre-command-hook #'hermes-comint--ensure-input-point nil t)
   (hermes-comint--setup))

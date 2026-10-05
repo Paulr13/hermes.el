@@ -562,5 +562,65 @@ live-state projection, both invocations converge to the same buffer."
         (hermes-comint-tab)
         (should-not (hermes-comint-test--fold-overlay))))))
 
+;;;; Real event chains (gateway-shaped payloads) + prompts wiring
+
+(defun hermes-comint-test--ht (&rest kvs)
+  "Build a hash-table payload like the gateway's JSON objects."
+  (let ((h (make-hash-table :test 'equal)))
+    (while kvs (puthash (pop kvs) (pop kvs) h))
+    h))
+
+(defun hermes-comint-test--state-from-events (sid events)
+  "Reduce EVENTS through `hermes--reduce' and return a state for SID."
+  (let ((s (let ((acc nil))
+             (dolist (e events) (setq acc (hermes--reduce acc e)))
+             acc)))
+    (make-hermes-state :session-id sid
+                       :turns (hermes-state-turns s)
+                       :stream (hermes-state-stream s))))
+
+(ert-deftest hermes-comint-test/terminal-tool-event-paints-command-and-folds ()
+  "Gateway-shaped terminal tool events paint the full command; TAB folds."
+  (let* ((sid (hermes-comint-test--fresh-sid))
+         (state (hermes-comint-test--state-from-events
+                 sid
+                 (list (cons "message.start" nil)
+                       (cons "tool.generating"
+                             (hermes-comint-test--ht "tool_id" "t1" "name" "terminal"))
+                       (cons "tool.start"
+                             (hermes-comint-test--ht
+                              "tool_id" "t1"
+                              "context" "{\"command\": \"echo hello && echo world\", \"cwd\": \"/home/r\"}"))
+                       (cons "tool.complete"
+                             (hermes-comint-test--ht
+                              "tool_id" "t1" "output" "hello\nworld\n"
+                              "duration_s" 0.2))
+                       (cons "message.complete"
+                             (hermes-comint-test--ht "text" "All done"))))))
+    (hermes-comint-test--with-buffer buf sid state
+      (with-current-buffer buf
+        ;; The full command appears in the body (formatter registered for
+        ;; the `terminal' tool name, not just the generic fallback).
+        (should (string-match-p "echo hello && echo world"
+                                (hermes-comint-test--committed-text)))
+        (goto-char (point-min))
+        (search-forward "DONE")
+        (beginning-of-line)
+        (hermes-comint-tab)
+        (let ((o (hermes-comint-test--fold-overlay)))
+          (should o)
+          (should (> (overlay-end o) (overlay-start o))))
+        (hermes-comint-tab)
+        (should-not (hermes-comint-test--fold-overlay))))))
+
+(ert-deftest hermes-comint-test/prompts-resolve-bench-buffer ()
+  "The prompts watcher resolves bench buffers via the comint registry,
+so approval / clarify / sudo prompts surface in bench-only sessions."
+  (require 'hermes-prompts)
+  (let* ((sid (hermes-comint-test--fresh-sid))
+         (state (make-hermes-state :session-id sid)))
+    (hermes-comint-test--with-buffer buf sid state
+      (should (eq buf (hermes-prompts--session-buffer sid))))))
+
 (provide 'hermes-comint-test)
 ;;; hermes-comint-test.el ends here
