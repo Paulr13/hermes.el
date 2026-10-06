@@ -198,5 +198,60 @@
           (should (equal "sess-7" (cdr res))))
       (remhash "sess-7" hermes--sessions))))
 
+(ert-deftest hermes-subagents-test/find-falls-back-to-committed-turns ()
+  "Post-commit the stream is nil; --find still locates the subagent
+via the committed turn's copy."
+  (let* ((s (hermes-test--reduce*
+             nil
+             (cons "message.start" nil)
+             (cons "subagent.spawn_requested"
+                   (hermes-test--ht "subagent_id" "sa-t" "goal" "Mirror it"))
+             (cons "message.complete" nil))))
+    (should (null (hermes-state-stream s)))
+    (puthash "sess-turns" s hermes--sessions)
+    (unwind-protect
+        (let ((res (hermes-subagents--find "sa-t")))
+          (should res)
+          (should (equal "Mirror it" (hermes-subagent-goal (car res))))
+          (should (equal "sess-turns" (cdr res)))
+          (should (null (hermes-subagents--find "sa-unknown"))))
+      (remhash "sess-turns" hermes--sessions))))
+
+(ert-deftest hermes-subagents-test/detail-open-after-commit-renders-late-summary ()
+  "Post-commit: detail-open renders from the committed turn, and a late
+completion event refreshes the open overview/detail buffers."
+  (let* ((s (hermes-test--reduce*
+             nil
+             (cons "message.start" nil)
+             (cons "subagent.spawn_requested"
+                   (hermes-test--ht "subagent_id" "sa-l" "goal" "Count hippos"))
+             (cons "message.complete" nil)))
+            (s2 (hermes-test--reduce*
+                 s
+                 (cons "subagent.complete"
+                       (hermes-test--ht "subagent_id" "sa-l"
+                                        "status" "complete"
+                                        "summary" "five hippos"))))
+            (hermes--current-session-id "sess-late"))
+    (puthash "sess-late" s hermes--sessions)
+    (unwind-protect
+        (progn
+          (hermes-subagents-detail-open "sa-l")
+          (with-current-buffer (hermes-subagents--detail-buffer-name "sa-l")
+            (should (string-match-p "Count hippos" (buffer-string))))
+          ;; Overview buffer exists so --render (and the detail refresh
+          ;; it triggers) runs on state change.
+          (hermes-subagents-open "sess-late")
+          (puthash "sess-late" s2 hermes--sessions)
+          (hermes-subagents--on-state-change s s2)
+          (with-current-buffer (hermes-subagents--detail-buffer-name "sa-l")
+            (should (string-match-p "five hippos" (buffer-string))))
+          (with-current-buffer hermes-subagents-buffer-name
+            (should (string-match-p "COMPLETE" (buffer-string)))))
+      (remhash "sess-late" hermes--sessions)
+      (ignore-errors (kill-buffer (hermes-subagents--detail-buffer-name "sa-l")))
+      (ignore-errors (kill-buffer hermes-subagents-buffer-name))
+      (setq hermes-subagents--fingerprint nil))))
+
 (provide 'hermes-subagents-test)
 ;;; hermes-subagents-test.el ends here

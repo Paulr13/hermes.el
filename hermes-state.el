@@ -569,6 +569,54 @@ first\" bug."
           (equal id (hermes-subagent-id sa))))
    subagents))
 
+(defun hermes-state--subagent-apply (state sid update)
+  "Apply UPDATE (function subagent -> subagent) to subagent SID in STATE.
+Prefers the live stream.  When the stream is absent or does not hold
+SID -- e.g. the turn already committed while the subagent kept running
+(delegate_task is async, so the child outlives the main turn) --
+updates the subagent's copy inside the committed turns instead, so
+late child events are not dropped.  Returns the new state; a
+completely unknown SID leaves STATE untouched."
+  (let* ((str (hermes-state-stream state))
+         (subagents (and str (hermes-stream-subagents str)))
+         (idx (and subagents (hermes--find-subagent subagents sid))))
+    (cond
+     (idx
+      (let* ((old-sa (aref subagents idx))
+             (new-sa (funcall update old-sa))
+             (new-sas (copy-sequence subagents)))
+        (aset new-sas idx new-sa)
+        (hermes--with-copy state hermes-state-copy s
+          (setf (hermes-state-stream s)
+                (hermes--with-copy str hermes-stream-copy ns
+                  (setf (hermes-stream-subagents ns) new-sas))))))
+     (t
+      (let* ((turns (hermes-state-turns state))
+             (hit nil))
+        (cl-loop
+         for ti downfrom (1- (length turns)) to 0
+         while (null hit)
+         do (let* ((m (aref turns ti))
+                   (sas (hermes-message-subagents m))
+                   (si (and sas (hermes--find-subagent sas sid))))
+              (when si
+                (setq hit (cons ti si)))))
+        (if (null hit)
+            state
+          (let* ((ti (car hit))
+                 (si (cdr hit))
+                 (m (aref turns ti))
+                 (sas (hermes-message-subagents m))
+                 (new-sa (funcall update (aref sas si)))
+                 (new-sas (copy-sequence sas)))
+            (aset new-sas si new-sa)
+            (let ((nm (hermes-message-copy m)))
+              (setf (hermes-message-subagents nm) new-sas)
+              (let ((new-turns (copy-sequence turns)))
+                (aset new-turns ti nm)
+                (hermes--with-copy state hermes-state-copy s
+                  (setf (hermes-state-turns s) new-turns)))))))))))
+
 ;;;; Pending-turns helper
 
 (defun hermes--push-pending (state msg)
@@ -1194,96 +1242,60 @@ branching so they don't affect reducer determinism):
                            (setf (hermes-stream-subagents ns)
                                  (hermes--vector-append subagents sa)))))))))))
       ("subagent.thinking"
-       (let ((str (hermes-state-stream state))
-             (sid (hermes--get p "subagent_id"))
+       (let ((sid (hermes--get p "subagent_id"))
              (text (or (hermes--get p "text") "")))
-         (if (or (null str) (null sid))
+         (if (null sid)
              state
-           (let* ((subagents (or (hermes-stream-subagents str) []))
-                  (idx (hermes--find-subagent subagents sid)))
-             (if (null idx)
-                 state
-               (let* ((old-sa (aref subagents idx))
-                      (new-sa (hermes--with-copy old-sa hermes-subagent-copy sa
-                                (setf (hermes-subagent-thinking sa)
-                                      (concat (hermes-subagent-thinking old-sa) text))))
-                      (new-sas (copy-sequence subagents)))
-                 (aset new-sas idx new-sa)
-                 (hermes--with-copy state hermes-state-copy s
-                   (setf (hermes-state-stream s)
-                         (hermes--with-copy str hermes-stream-copy ns
-                           (setf (hermes-stream-subagents ns) new-sas))))))))))
+           (hermes-state--subagent-apply
+            state sid
+            (lambda (sa)
+              (hermes--with-copy sa hermes-subagent-copy ns
+				 (setf (hermes-subagent-thinking ns)
+				       (concat (hermes-subagent-thinking sa) text))))))))
       ("subagent.tool"
-       (let ((str (hermes-state-stream state))
-             (sid (hermes--get p "subagent_id"))
+       (let ((sid (hermes--get p "subagent_id"))
              (tname (hermes--get p "tool_name"))
              (args (hermes--get p "args")))
-         (if (or (null str) (null sid))
+         (if (null sid)
              state
-           (let* ((subagents (or (hermes-stream-subagents str) []))
-                  (idx (hermes--find-subagent subagents sid)))
-             (if (null idx)
-                 state
-               (let* ((old-sa (aref subagents idx))
-                      (new-tool (list :name tname :args args
-                                      :timestamp (current-time)))
-                      (new-sa (hermes--with-copy old-sa hermes-subagent-copy sa
-                                (setf (hermes-subagent-tools sa)
-                                      (hermes--vector-append
-                                       (hermes-subagent-tools old-sa) new-tool))))
-                      (new-sas (copy-sequence subagents)))
-                 (aset new-sas idx new-sa)
-                 (hermes--with-copy state hermes-state-copy s
-                   (setf (hermes-state-stream s)
-                         (hermes--with-copy str hermes-stream-copy ns
-                           (setf (hermes-stream-subagents ns) new-sas))))))))))
+           (hermes-state--subagent-apply
+            state sid
+            (lambda (sa)
+              (hermes--with-copy sa hermes-subagent-copy ns
+				 (setf (hermes-subagent-tools ns)
+				       (hermes--vector-append
+					(hermes-subagent-tools sa)
+					(list :name tname :args args
+					      :timestamp (current-time))))))))))
       ("subagent.progress"
-       (let ((str (hermes-state-stream state))
-             (sid (hermes--get p "subagent_id"))
+       (let ((sid (hermes--get p "subagent_id"))
              (note (hermes--get p "note")))
-         (if (or (null str) (null sid))
+         (if (null sid)
              state
-           (let* ((subagents (or (hermes-stream-subagents str) []))
-                  (idx (hermes--find-subagent subagents sid)))
-             (if (null idx)
-                 state
-               (let* ((old-sa (aref subagents idx))
-                      (new-sa (hermes--with-copy old-sa hermes-subagent-copy sa
-                                (setf (hermes-subagent-notes sa)
-                                      (hermes--vector-append
-                                       (hermes-subagent-notes old-sa) note))))
-                      (new-sas (copy-sequence subagents)))
-                 (aset new-sas idx new-sa)
-                 (hermes--with-copy state hermes-state-copy s
-                   (setf (hermes-state-stream s)
-                         (hermes--with-copy str hermes-stream-copy ns
-                           (setf (hermes-stream-subagents ns) new-sas))))))))))
+           (hermes-state--subagent-apply
+            state sid
+            (lambda (sa)
+              (hermes--with-copy sa hermes-subagent-copy ns
+				 (setf (hermes-subagent-notes ns)
+				       (hermes--vector-append
+					(hermes-subagent-notes sa) note))))))))
       ("subagent.complete"
-       (let ((str (hermes-state-stream state))
-             (sid (hermes--get p "subagent_id"))
+       (let ((sid (hermes--get p "subagent_id"))
              (status (hermes--get p "status"))
              (summary (hermes--get p "summary"))
              (dur (hermes--get p "duration_s")))
-         (if (or (null str) (null sid))
+         (if (null sid)
              state
-           (let* ((subagents (or (hermes-stream-subagents str) []))
-                  (idx (hermes--find-subagent subagents sid)))
-             (if (null idx)
-                 state
-               (let* ((old-sa (aref subagents idx))
-                      (status-kw (cond ((equal status "error") 'error)
-                                       ((equal status "complete") 'complete)
-                                       (t (or status 'complete))))
-                      (new-sa (hermes--with-copy old-sa hermes-subagent-copy sa
-                                (setf (hermes-subagent-status sa) status-kw
-                                      (hermes-subagent-summary sa) summary
-                                      (hermes-subagent-duration sa) dur)))
-                      (new-sas (copy-sequence subagents)))
-                 (aset new-sas idx new-sa)
-                 (hermes--with-copy state hermes-state-copy s
-                   (setf (hermes-state-stream s)
-                         (hermes--with-copy str hermes-stream-copy ns
-                           (setf (hermes-stream-subagents ns) new-sas))))))))))
+           (let ((status-kw (cond ((equal status "error") 'error)
+                                  ((equal status "complete") 'complete)
+                                  (t (or status 'complete)))))
+             (hermes-state--subagent-apply
+              state sid
+              (lambda (sa)
+                (hermes--with-copy sa hermes-subagent-copy ns
+				   (setf (hermes-subagent-status ns) status-kw
+					 (hermes-subagent-summary ns) summary
+					 (hermes-subagent-duration ns) dur))))))))
       ;; --- Tools ---------------------------------------------------------
       ("tool.generating"
        (let ((str (hermes-state-stream state))

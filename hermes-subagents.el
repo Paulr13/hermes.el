@@ -229,18 +229,64 @@ all notes, and a large thinking tail."
       (push (concat "Summary: " (hermes-subagent-summary sa)) lines))
     (nreverse lines)))
 
+(defun hermes-subagents--visible-subagents (state)
+  "Subagents to display for STATE.
+Live stream first; when the stream is gone (post-commit), fall back to
+the most recent committed turn's copy, where subagents keep living."
+  (let ((stream (hermes-state-stream state)))
+    (or (and stream (hermes-stream-subagents stream))
+        (let ((turns (hermes-state-turns state))
+              (found nil))
+          (cl-loop
+           for i downfrom (1- (length turns)) to 0
+           while (null found)
+           do (let ((sas (hermes-message-subagents (aref turns i))))
+                (when (and sas (> (length sas) 0))
+                  (setq found sas))))
+          found))))
+
+(defun hermes-subagents--collect-turn-sas (state)
+  "All subagents in STATE's committed turns, newest turn first."
+  (let ((turns (hermes-state-turns state)))
+    (when (> (length turns) 0)
+      (apply #'append
+             (mapcar
+              (lambda (m)
+                (append (or (hermes-message-subagents m) []) nil))
+              (nreverse (append turns nil)))))))
+
 (defun hermes-subagents--find (id)
-  "Return (SA . SID) for subagent ID, searching all known sessions."
+  "Return (SA . SID) for subagent ID, searching all known sessions.
+Live streams first, then committed turns (subagents keep living there
+after the turn commits)."
   (let (found)
     (maphash
      (lambda (sid state)
-       (unless found
-         (let ((stream (hermes-state-stream state)))
-           (when stream
-             (dolist (sa (append (or (hermes-stream-subagents stream) []) nil))
-               (when (and (not found) (equal (hermes-subagent-id sa) id))
-                 (setq found (cons sa sid))))))))
+       (let* ((stream (hermes-state-stream state))
+              (stream-sas (and stream
+                               (append
+                                (or (hermes-stream-subagents stream) [])
+                                nil)))
+              (hit (and (not found)
+                        (cl-find-if
+                         (lambda (sa)
+                           (equal id (hermes-subagent-id sa)))
+                         stream-sas))))
+         (when hit
+           (setq found (cons hit sid)))))
      hermes--sessions)
+    (unless found
+      (maphash
+       (lambda (sid state)
+         (let* ((turn-sas (hermes-subagents--collect-turn-sas state))
+                (hit (and (not found)
+                          (cl-find-if
+                           (lambda (sa)
+                             (equal id (hermes-subagent-id sa)))
+                           turn-sas))))
+           (when hit
+             (setq found (cons hit sid)))))
+       hermes--sessions))
     found))
 
 (defun hermes-subagents--render-detail (id sa)
@@ -261,13 +307,11 @@ all notes, and a large thinking tail."
                           (let (ids)
                             (maphash
                              (lambda (_ state)
-                               (let ((stream (hermes-state-stream state)))
-                                 (when stream
-                                   (dolist (sa (append
-                                                (or (hermes-stream-subagents
-                                                     stream) []) nil))
-                                     (cl-pushnew (hermes-subagent-id sa) ids
-                                                 :test #'equal)))))
+                               (dolist (sa (append
+                                            (or (hermes-subagents--visible-subagents
+                                                 state) []) nil))
+                                 (cl-pushnew (hermes-subagent-id sa) ids
+                                             :test #'equal)))
                              hermes--sessions)
                             (nreverse ids)))))
   (pcase-let ((`(,sa . ,sid) (hermes-subagents--find id)))
@@ -334,8 +378,7 @@ all notes, and a large thinking tail."
 (defun hermes-subagents--render (sid)
   "Render session SID's subagents into the buffer, if any."
   (let* ((state (and sid (gethash sid hermes--sessions)))
-         (stream (and state (hermes-state-stream state)))
-         (subagents (and stream (hermes-stream-subagents stream))))
+         (subagents (and state (hermes-subagents--visible-subagents state))))
     (when (and subagents (> (length subagents) 0))
       (with-current-buffer (hermes-subagents--buffer)
         (setq hermes-subagents--sid sid)
@@ -347,15 +390,12 @@ all notes, and a large thinking tail."
         (setq buffer-read-only t))
       (hermes-subagents--render-details subagents))))
 
-(defun hermes-subagents--on-state-change (_old new)
+(defun hermes-subagents--on-state-change (old new)
   "`hermes-state-change-hook' handler: refresh on subagent changes."
   (let ((sid hermes--current-session-id))
     (when sid
-      (let* ((stream (and (hermes-state-stream new)
-                          (hermes-state-stream new)))
-             (old-sas (and (hermes-state-stream _old)
-                           (hermes-stream-subagents (hermes-state-stream _old))))
-             (new-sas (and stream (hermes-stream-subagents stream))))
+      (let* ((old-sas (hermes-subagents--visible-subagents old))
+             (new-sas (hermes-subagents--visible-subagents new)))
         (when (and new-sas (> (length new-sas) 0))
           (setq hermes-subagents--last-sid sid)
           (let ((fp (list sid (hermes-subagents--serialize new-sas))))
@@ -376,9 +416,8 @@ SID defaults to the session with the most recent subagent activity."
                     (let (found)
                       (maphash (lambda (s state)
                                  (unless found
-                                   (let* ((stream (hermes-state-stream state))
-                                          (sas (and stream
-                                                    (hermes-stream-subagents stream))))
+                                   (let ((sas (hermes-subagents--visible-subagents
+                                               state)))
                                      (when (and sas (> (length sas) 0))
                                        (setq found s)))))
                                hermes--sessions)
@@ -389,9 +428,9 @@ SID defaults to the session with the most recent subagent activity."
                       `(display-buffer-below-selected
                         (window-height . ,hermes-subagents-window-height)
                         (inhibit-same-window . t)))
-      (let ((win (get-buffer-window (hermes-subagents-buffer-name))))
+      (let ((win (get-buffer-window hermes-subagents-buffer-name)))
         (when (window-live-p win)
-          (set-window-dedicated win t)
+          (set-window-parameter win 'dedicated t)
           (set-window-parameter win 'never-select t)))
       hermes-subagents-buffer-name)))
 

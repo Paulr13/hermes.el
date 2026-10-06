@@ -61,7 +61,8 @@ and stripping; keeping them on a single source avoids drift.")
 ;; TUI-flavored selector that doesn't apply here.  Intercept those three
 ;; client-side before falling through to `slash.exec'.  Everything else
 ;; (`/title', `/branch', `/compress', `/undo', `/usage', `/save', …)
-;; routes server-side as usual.
+;; routes server-side as usual — including `/save <format> [filename]
+;; [redact]' (json/md/html; gateway writes under ~/.hermes/sessions/saved/).
 
 (defconst hermes-input--session-slash-re
   "\\`\\s-*/\\(resume\\|sessions\\|delete\\)\\(?:\\s-+\\(.*\\)\\)?\\s-*\\'"

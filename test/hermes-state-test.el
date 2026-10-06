@@ -1612,5 +1612,84 @@ must still resolve the name-keyed placeholder."
          (previews (hermes-ui-state-tool-previews s)))
     (should (equal "hello" (cdr (assoc "t1" previews))))))
 
+(ert-deftest hermes-state-test/subagent-complete-after-commit-updates-turns ()
+  "delegate_task is async: after the turn commits (stream nil'd), late
+subagent events must update the subagent's copy in the committed turn."
+  (let* ((s (hermes-test--reduce*
+             nil
+             (cons "message.start" nil)
+             (cons "subagent.spawn_requested"
+                   (hermes-test--ht "subagent_id" "sa1" "goal" "g"))
+             (cons "subagent.start" (hermes-test--ht "subagent_id" "sa1"))
+             (cons "message.complete" nil)))
+         (msg (aref (hermes-state-turns s) 0)))
+    (should (null (hermes-state-stream s)))
+    (should (eq 'running
+                (hermes-subagent-status
+                 (aref (hermes-message-subagents msg) 0))))
+    (let* ((s2 (hermes-test--reduce*
+                s
+                (cons "subagent.complete"
+                      (hermes-test--ht "subagent_id" "sa1"
+                                       "status" "complete"
+                                       "summary" "done-zulu"))))
+           (sa2 (aref (hermes-message-subagents
+                       (aref (hermes-state-turns s2) 0)) 0)))
+      (should (null (hermes-state-stream s2)))
+      (should (eq 'complete (hermes-subagent-status sa2)))
+      (should (equal "done-zulu" (hermes-subagent-summary sa2)))
+      ;; Old state untouched (reducer purity).
+      (should (eq 'running
+                  (hermes-subagent-status
+                   (aref (hermes-message-subagents msg) 0)))))))
+
+(ert-deftest hermes-state-test/subagent-tool-after-commit-appends-tool ()
+  "A late `subagent.tool' event lands in the committed turn's copy."
+  (let* ((s (hermes-test--reduce*
+             nil
+             (cons "message.start" nil)
+             (cons "subagent.spawn_requested"
+                   (hermes-test--ht "subagent_id" "sa2" "goal" "g"))
+             (cons "message.complete" nil)))
+         (s2 (hermes-test--reduce*
+              s
+              (cons "subagent.tool"
+                    (hermes-test--ht "subagent_id" "sa2"
+                                     "tool_name" "terminal"
+                                     "args" (hermes-test--ht "cmd" "echo 1")))))
+         (sa2 (aref (hermes-message-subagents
+                     (aref (hermes-state-turns s2) 0)) 0)))
+    (should (= 1 (length (hermes-subagent-tools sa2))))
+    (should (equal "terminal" (plist-get (aref (hermes-subagent-tools sa2) 0)
+                                         :name)))))
+
+(ert-deftest hermes-state-test/subagent-late-event-unknown-id-noop ()
+  "A late event for a subagent known nowhere leaves state unchanged."
+  (let* ((s (hermes-test--reduce*
+             nil
+             (cons "message.start" nil)))
+         (s2 (hermes-test--reduce*
+              s
+              (cons "subagent.complete"
+                    (hermes-test--ht "subagent_id" "ghost"
+                                     "status" "complete")))))
+    (should (= 0 (length (hermes-state-turns s2))))
+    (should (eq (hermes-state-stream s2) (hermes-state-stream s)))))
+
+(ert-deftest hermes-state-test/subagent-in-stream-still-updates-stream ()
+  "The stream path is unchanged when the subagent lives in the stream."
+  (let* ((s (hermes-test--reduce*
+             nil
+             (cons "message.start" nil)
+             (cons "subagent.spawn_requested"
+                   (hermes-test--ht "subagent_id" "sa3" "goal" "g"))
+             (cons "subagent.complete"
+                   (hermes-test--ht "subagent_id" "sa3"
+                                    "status" "complete"
+                                    "summary" "stream-sum"))))
+         (sa (aref (hermes-stream-subagents (hermes-state-stream s)) 0)))
+    (should (eq 'complete (hermes-subagent-status sa)))
+    (should (equal "stream-sum" (hermes-subagent-summary sa)))))
+
 (provide 'hermes-state-test)
 ;;; hermes-state-test.el ends here
