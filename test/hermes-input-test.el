@@ -325,5 +325,136 @@ when the new session hasn't been stamped yet, and stamps it."
       (should (equal "slash.exec" (car call)))
       (should (equal "title hello" (plist-get (cdr call) :command))))))
 
+;;;; Slash result handling — slash.exec / command.dispatch directives
+
+(defun hermes-input-test--hash (&rest kvs)
+  "Build a hash table from alternating KVS."
+  (let ((h (make-hash-table :test #'equal)))
+    (while kvs
+      (puthash (pop kvs) (pop kvs) h))
+    h))
+
+(ert-deftest hermes-input-test/pair-desc-filters-usage-suffix-placeholder ()
+  "The unresolved i18n key is filtered; real descriptions survive."
+  (should (equal "Token usage for this session"
+                 (hermes-input--pair-desc ["/usage" "Token usage for this session"])))
+  (should-not (hermes-input--pair-desc ["/foo" "slash.shared.usage_suffix"]))
+  (should-not (hermes-input--pair-desc ["/foo" ""])))
+
+(ert-deftest hermes-input-test/slash-output-plus-warning-renders ()
+  "Worker output renders with the gateway warning appended."
+  (hermes-input-test--with-buffer
+    (hermes-input--slash-result
+     "save" (hermes-input-test--hash "output" "Saved" "warning" "another client")
+     nil "sess-1" (current-buffer) 0)
+    (should (= 0 (length hermes-input-test--rpc-calls)))
+    (should (string-match-p "Saved" (buffer-string)))
+    (should (string-match-p "⚠ another client" (buffer-string)))))
+
+(ert-deftest hermes-input-test/slash-warning-only-renders ()
+  "Empty output + warning is no longer silent."
+  (hermes-input-test--with-buffer
+    (hermes-input--slash-result
+     "compress" (hermes-input-test--hash "output" "" "warning" "mirrored side effect")
+     nil "sess-1" (current-buffer) 0)
+    (should (= 0 (length hermes-input-test--rpc-calls)))
+    (should (string-match-p "⚠ mirrored side effect" (buffer-string)))))
+
+(ert-deftest hermes-input-test/slash-send-directive-submits-message ()
+  "type=send: notice renders and MESSAGE goes out as a user turn."
+  (hermes-input-test--with-buffer
+    (hermes-input--slash-result
+     "retry" (hermes-input-test--hash "type" "send" "message" "retry text"
+                                      "notice" "Resending last message")
+     nil "sess-1" (current-buffer) 0)
+    (should (= 1 (length hermes-input-test--rpc-calls)))
+    (should (equal "prompt.submit" (car (car hermes-input-test--rpc-calls))))
+    (should (string-suffix-p "retry text"
+                             (plist-get (cdr (car hermes-input-test--rpc-calls)) :text)))
+    (should (string-match-p "Resending last message" (buffer-string)))
+    (should (hermes-input-test--buffer-has-user-heading-p "retry text"))))
+
+(ert-deftest hermes-input-test/slash-skill-directive-submits-message ()
+  "type=skill: display renders and MESSAGE is submitted."
+  (hermes-input-test--with-buffer
+    (hermes-input--slash-result
+     "greeting" (hermes-input-test--hash "type" "skill"
+                                         "message" "use the greeting skill"
+                                         "display" "[greeting]")
+     nil "sess-1" (current-buffer) 0)
+    (should (equal "prompt.submit" (car (car hermes-input-test--rpc-calls))))
+    (should (string-suffix-p "use the greeting skill"
+                             (plist-get (cdr (car hermes-input-test--rpc-calls)) :text)))
+    (should (string-match-p "\\[greeting\\]" (buffer-string)))))
+
+(ert-deftest hermes-input-test/slash-send-without-message-renders-only ()
+  "A send directive without message must not fire an RPC."
+  (hermes-input-test--with-buffer
+    (hermes-input--slash-result
+     "retry" (hermes-input-test--hash "type" "send")
+     nil "sess-1" (current-buffer) 0)
+    (should (= 0 (length hermes-input-test--rpc-calls)))
+    (should (string-match-p "no message to send" (buffer-string)))))
+
+(ert-deftest hermes-input-test/slash-alias-directive-redispatches-target ()
+  "type=alias re-runs the target command verbatim."
+  (hermes-input-test--with-buffer
+    (hermes-input--slash-result
+     "st" (hermes-input-test--hash "type" "alias" "target" "status")
+     nil "sess-1" (current-buffer) 0)
+    (should (= 1 (length hermes-input-test--rpc-calls)))
+    (should (equal "slash.exec" (car (car hermes-input-test--rpc-calls))))
+    (should (equal "status"
+                   (plist-get (cdr (car hermes-input-test--rpc-calls)) :command)))))
+
+(ert-deftest hermes-input-test/slash-alias-carries-args ()
+  "Alias re-dispatch passes the original argument through."
+  (hermes-input-test--with-buffer
+    (hermes-input--slash-result
+     "u quick" (hermes-input-test--hash "type" "alias" "target" "usage")
+     nil "sess-1" (current-buffer) 0)
+    (should (equal "usage quick"
+                   (plist-get (cdr (car hermes-input-test--rpc-calls)) :command)))))
+
+(ert-deftest hermes-input-test/slash-alias-loop-is-bounded ()
+  "Alias chains stop at `hermes-input--slash-max-depth'."
+  (hermes-input-test--with-buffer
+    (hermes-input--slash-result
+     "a" (hermes-input-test--hash "type" "alias" "target" "b")
+     nil "sess-1" (current-buffer) hermes-input--slash-max-depth)
+    (should (= 0 (length hermes-input-test--rpc-calls)))
+    (should (string-match-p "alias chain too deep" (buffer-string)))))
+
+(ert-deftest hermes-input-test/slash-skill-4018-retries-via-dispatch ()
+  "Error 4018 auto-retries through command.dispatch."
+  (hermes-input-test--with-buffer
+    (hermes-input--slash-result
+     "greeting" nil
+     (hermes-input-test--hash "code" 4018
+                              "message" "skill command: use command.dispatch for /greeting")
+     "sess-1" (current-buffer) 0)
+    (should (= 1 (length hermes-input-test--rpc-calls)))
+    (should (equal "command.dispatch" (car (car hermes-input-test--rpc-calls))))
+    (should (equal "greeting" (plist-get (cdr (car hermes-input-test--rpc-calls)) :name)))
+    (should (equal "" (plist-get (cdr (car hermes-input-test--rpc-calls)) :arg)))))
+
+(ert-deftest hermes-input-test/slash-skill-4018-carries-args ()
+  "The 4018 retry passes the command's argument text through."
+  (hermes-input-test--with-buffer
+    (hermes-input--slash-result
+     "greeting hi there" nil
+     (hermes-input-test--hash "code" 4018 "message" "use command.dispatch")
+     "sess-1" (current-buffer) 0)
+    (should (equal "hi there" (plist-get (cdr (car hermes-input-test--rpc-calls)) :arg)))))
+
+(ert-deftest hermes-input-test/slash-skill-4018-at-cap-renders-error ()
+  "A 4018 retry already at the depth cap renders the error instead."
+  (hermes-input-test--with-buffer
+    (hermes-input--slash-result
+     "greeting" nil
+     (hermes-input-test--hash "code" 4018 "message" "use command.dispatch for /greeting")
+     "sess-1" (current-buffer) hermes-input--slash-max-depth)
+    (should (= 0 (length hermes-input-test--rpc-calls)))
+    (should (string-match-p "use command.dispatch" (buffer-string)))))
 (provide 'hermes-input-test)
 ;;; hermes-input-test.el ends here
