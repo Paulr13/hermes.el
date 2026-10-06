@@ -66,11 +66,15 @@
                                              "choices" ["a" "b"])
                     (hermes-prompts-test--ht "qid" "q2" "question" "Free:")))))
    (let* ((ans (hermes-prompts-test--last-answer))
-          (answers (nth 1 ans)))
+          (result (nth 1 ans)))
      (should (equal "srq-4" (nth 0 ans)))
-     (should (hash-table-p answers))
-     (should (equal "b" (gethash "q1" answers)))
-     (should (equal "free answer" (gethash "q2" answers))))))
+     ;; Batch contract: the result must WRAP the answers in an `answers'
+     ;; key — a frame without it is cancel-all per the gateway contract.
+     (should (plist-get result :answers))
+     (let ((answers (plist-get result :answers)))
+       (should (hash-table-p answers))
+       (should (equal "b" (gethash "q1" answers)))
+       (should (equal "free answer" (gethash "q2" answers)))))))
 
 (ert-deftest hermes-prompts-test/clarify-quit-responds-cancel-all ()
   (hermes-prompts-test--capture-responds

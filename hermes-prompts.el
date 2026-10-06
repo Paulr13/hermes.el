@@ -134,7 +134,17 @@ use it, answers go out atomically."
                                         (read-string (concat question " "))))
                                   (quit (throw 'cancel t)))))
                           (puthash qid answer answers)))
-                      (hermes-rpc-respond rid answers)
+                      ;; The batch contract is `{answers: {qid: str}}' — a
+                      ;; frame whose result LACKS the `answers' key is
+                      ;; cancel-all (server_requests.resolve_response wraps
+                      ;; the queue's locked set as outcome "cancelled").
+                      ;; Sending the bare {qid: answer} hash read as a
+                      ;; cancellation and lost the user's every answer.
+                      (if questions
+                          (hermes-rpc-respond rid (list :answers answers))
+                        ;; Degenerate: nothing was asked; an empty frame
+                        ;; settles the request as cancel-all.
+                        (hermes-rpc-respond rid (make-hash-table :test 'equal)))
                       nil)))
     (when cancelled
       ;; Nothing was answered: a frame without `answers' cancels the
