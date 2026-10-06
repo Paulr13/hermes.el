@@ -1451,6 +1451,16 @@ branching so they don't affect reducer determinism):
                (make-hermes-pending :kind 'secret
                                     :request-id (hermes--get p "request_id")
                                     :payload p))))
+      ("request.cancel"
+       ;; An open server→client request was withdrawn (timeout / interrupt /
+       ;; another surface answered).  Tear our card down when it matches;
+       ;; other methods' cancels don't touch a pending prompt.
+       (let ((pend (hermes-state-pending state)))
+         (if (and pend
+                  (equal (hermes--get p "id") (hermes-pending-request-id pend)))
+             (hermes--with-copy state hermes-state-copy s
+               (setf (hermes-state-pending s) nil))
+           state)))
       (:system-message
        (let* ((text (plist-get p :text))
               (msg (make-hermes-message

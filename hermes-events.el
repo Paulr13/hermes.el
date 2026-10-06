@@ -46,11 +46,20 @@
     "subagent.tool"             ; {subagent_id, tool_name, args}
     "subagent.progress"         ; {subagent_id, note}
     "subagent.complete"         ; {subagent_id, status, summary, duration_s}
-    ;; Blocking prompts
-    "approval.request"       ; {request_id, command, description, ...}
-    "clarify.request"        ; {request_id, question, choices}
-    "sudo.request"           ; {request_id}
-    "secret.request"         ; {request_id, env_var, prompt}
+    ;; Blocking prompts — arrive as server→client REQUEST frames now
+    ;; (`hermes-events-server-requests'), not as `*.request' events:
+    ;;   approval  {request_id, command, description, choices, ...}
+    ;;   clarify   {questions: [{qid, question, choices, multi_select}], answers?}
+    ;;   sudo      {command}
+    ;;   secret    {env_var, prompt, metadata?}
+    ;;   vault.unlock_prompt {backend, display_name}
+    ;;   vault.save_login    {origin, site}
+    ;;   vault.code          {site?, hint?}
+    ;; `hermes--route-server-request' synthesizes the legacy event names
+    ;; below so the reducer keeps one pending-prompt shape; the frame's
+    ;; `srq-*' id becomes the payload's request_id.
+    "request.cancel"         ; {id, method, reason} — an open server request
+                             ; timed out / was withdrawn; tear the card down
     ;; Gateway lifecycle / diagnostics
     "gateway.stderr"         ; {line}  — raw stderr line from subprocess
     "gateway.start_timeout"  ; {lines} — last stderr tail when gateway fails to start
@@ -65,6 +74,33 @@
     "voice.transcript")      ; v1: no-op
   "All gateway event types the Emacs client may receive.")
 
+;;;; Incoming server→client requests (gateway → TUI, peer-to-peer)
+;;
+;; Frames are JSON-RPC REQUESTS the gateway writes to the same stdio:
+;;   {"jsonrpc":"2.0","id":"srq-<hex>","method":"<kind>",
+;;    "params":{"session_id":"<sid>", ...}}
+;; The client answers with a RESPONSE frame carrying the same id
+;; (`hermes-rpc-respond').  `request.cancel' arrives as an event when
+;; the wait ends by timeout / interrupt / another surface's answer.
+;; Shapes: tui_gateway/contracts/server_requests.py.
+
+(defconst hermes-events-server-requests
+  '(;; The four the Emacs client answers
+    "clarify"                ; {questions:[{qid,question,choices,multi_select}], answers?}
+                             ;   → {answers:{qid:str|null}} | {} (cancel-all)
+    "approval"               ; {request_id, command, description, choices, ...} → {choice, all?}
+    "sudo"                   ; {command}   → {value} ('' = declined)
+    "secret"                 ; {env_var, prompt, metadata?} → {value}
+    ;; Vault prompts (generic ValueResult, not handled yet)
+    "vault.unlock_prompt"    ; {backend, display_name}  → {value}
+    "vault.save_login"       ; {origin, site}           → {value: JSON {identifier, password}}
+    "vault.code"             ; {site?, hint?}           → {value}
+    ;; Window-owned bridges: answer NOT_SHOWN (4404) when not visible
+    "terminal.read" "preview.read" "window.read"
+    "preview.act" "tour")
+  "Server→client request methods this gateway may send.
+Dispatched on `hermes-rpc-server-request-functions'.")
+
 ;;;; Outgoing requests (TUI → gateway)
 ;;
 ;; Frames are JSON-RPC 2.0 requests with auto-incrementing integer id.
@@ -72,6 +108,7 @@
 
 (defconst hermes-rpc-methods
   '(;; Session lifecycle
+    "client.capabilities"    ; {server_requests: t} → {server_requests: [methods]}
     "session.create"         ; {cols?}                       → {session_id}
     "session.resume"         ; {session_id}                  (long handler, async) → {session_id, resumed, message_count, messages, info}
     "session.close"          ; {session_id}
@@ -91,11 +128,19 @@
     "prompt.submit"          ; {session_id, text}
     "prompt.background"      ; {session_id, text}            → {task_id}
     "session.steer"          ; {session_id, text}            → {status, text}
-    ;; Blocking prompt responses (echo request_id)
-    "approval.respond"       ; {session_id, request_id, choice, all?}
-    "clarify.respond"        ; {request_id, answer}
-    "sudo.respond"           ; {request_id, password}
-    "secret.respond"         ; {request_id, value}
+    ;; Blocking prompt responses — the gateway sends every prompt as a
+    ;; server→client request (see `hermes-events-server-requests'); the
+    ;; client answers with a RESPONSE frame via `hermes-rpc-respond'
+    ;; (shapes per kind are in tui_gateway/contracts/server_requests.py):
+    ;;   approval  → {choice, all?}        clarify → {answers} | {}
+    ;;   sudo      → {value}               secret  → {value}
+    ;; `request.answer' is the RPC proxy for a response frame; `clarify.lock'
+    ;; locks one batch-clarify question at a time (unused — the Emacs client
+    ;; answers clarify in one response frame).
+    "clarify.lock"           ; {request_id, question_id, answer} → {status, remaining?}
+    "request.answer"         ; {id, result}                     → {status}
+    "approval.respond"       ; {session_id, request_id, choice, all?} → {resolved}
+                             ; (response frame is the norm; kept for /usage-style reuse)
     ;; Slash and commands
     "slash.exec"             ; {session_id, command}         (long handler, async)
     "shell.exec"             ; {command}                     → {stdout, stderr, code}

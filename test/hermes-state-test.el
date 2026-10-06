@@ -1081,6 +1081,40 @@ must still resolve the name-keyed placeholder."
          (s1 (hermes--reduce s0 '(:pending-clear))))
     (should (eq s0 s1))))
 
+(ert-deftest hermes-state-test/request-cancel-clears-matching-pending ()
+  (let* ((s1 (hermes--reduce nil
+                             (cons "approval.request"
+                                   (hermes-test--ht "request_id" "srq-7"
+                                                    "command" "ls"))))
+         (s2 (hermes--reduce s1
+                             (cons "request.cancel"
+                                   (hermes-test--ht "id" "srq-7"
+                                                    "method" "approval"
+                                                    "reason" "timeout"))))
+         (pend (hermes-state-pending s2)))
+    (should (null pend))))
+
+(ert-deftest hermes-state-test/request-cancel-other-id-keeps-pending ()
+  (let* ((s1 (hermes--reduce nil
+                             (cons "approval.request"
+                                   (hermes-test--ht "request_id" "srq-7"))))
+         (s2 (hermes--reduce s1
+                             (cons "request.cancel"
+                                   (hermes-test--ht "id" "srq-other"
+                                                    "method" "clarify"
+                                                    "reason" "timeout"))))
+         (pend (hermes-state-pending s2)))
+    (should (hermes-pending-p pend))))
+
+(ert-deftest hermes-state-test/request-cancel-when-no-pending-is-noop ()
+  (let* ((s0 (hermes--reduce nil '(:connected)))
+         (s1 (hermes--reduce s0
+                             (cons "request.cancel"
+                                   (hermes-test--ht "id" "srq-9"
+                                                    "method" "sudo"
+                                                    "reason" "timeout")))))
+    (should (eq s0 s1))))
+
 (ert-deftest hermes-state-test/sudo-and-secret-request-set-pending ()
   (let* ((s1 (hermes--reduce nil
                              (cons "sudo.request"
