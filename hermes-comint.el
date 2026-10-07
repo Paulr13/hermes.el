@@ -1575,6 +1575,12 @@ Projects from the same `turns' state as the org viewer.
   ;; idempotent per function, so per-buffer calls are fine.
   (require 'hermes-prompts)
   (add-hook 'hermes-state-change-hook #'hermes-prompts-watch t)
+  ;; Slash completion is the ONLY CAPF in hermes comint buffers (bench
+  ;; and conversation alike): the client never completes file names in
+  ;; the prompt, so plain text must not fall through to comint's file
+  ;; completion — "/" gets the slash menu, anything else gets nothing.
+  (setq-local completion-at-point-functions
+              (list #'hermes-comint-bench--slash-complete))
   (setq-local scroll-margin 0)
   (add-hook 'pre-command-hook #'hermes-comint--ensure-input-point nil t)
   (hermes-comint--setup))
@@ -1732,12 +1738,12 @@ Subscribed to `hermes-skin-applied-hook'."
 ;;;; Bench: slash-command CAPF
 
 (defun hermes-comint-bench--slash-complete ()
-  "Slash-command CAPF for the bench input area.
-The slash must appear immediately after the bench prompt prefix.
-Pulls the catalog from the session state in `hermes--sessions' and
-delegates to `hermes-input--slash-complete'."
+  "Slash-command CAPF for hermes comint input areas.
+Applies to bench and conversation buffers alike: the slash must
+appear immediately after the prompt prefix.  Pulls the catalog
+from the session state in `hermes--sessions' and delegates to
+`hermes-input--slash-complete'."
   (when (and hermes--current-session-id
-             hermes-comint--bench-p
              (hermes-comint--in-input-area-p))
     (let* ((p (marker-position hermes-comint--prompt-start))
            (input-start (and p (+ p (length hermes-comint--prompt-string)))))
@@ -1767,12 +1773,10 @@ set to t and displayed as a bottom side-window."
         (hermes-comint-mode)
         ;; `define-derived-mode' runs `kill-all-local-variables', so
         ;; setting the flag before entering the mode would be lost.
-        ;; Assert bench identity AFTER mode entry, then install the
-        ;; bench-specific CAPF.
+        ;; Assert bench identity AFTER mode entry.  The slash CAPF now
+        ;; comes from hermes-comint-mode itself (all comint buffers).
         (setq-local hermes-comint--bench-p t)
         (setq-local hermes--current-session-id sid)
-        (add-hook 'completion-at-point-functions
-                  #'hermes-comint-bench--slash-complete nil t)
         (hermes-comint-bench--apply-bg)
         (hermes-comint--install-mode-line)))
     (display-buffer-in-side-window

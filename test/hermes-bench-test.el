@@ -155,6 +155,46 @@
     (with-current-buffer bench
       (should-not (hermes-comint-bench--slash-complete)))))
 
+(ert-deftest hermes-bench-test/capf-in-conversation-buffer ()
+  "Slash CAPF works in a plain conversation buffer (no bench flag).
+Regression 2026-10-07: the CAPF was bench-only, so typing \"/\" in a
+`*hermes:<sid>*' conversation buffer fell through to comint's file
+completion and the popup offered directories instead of commands."
+  (let* ((pair (hermes-bench-test--make-parent))
+         (parent (car pair))
+         (sid (cdr pair)))
+    (unwind-protect
+        (with-temp-buffer
+          (hermes-comint-mode)
+          (setq-local hermes--current-session-id sid)
+          (should-not hermes-comint--bench-p)
+          ;; The mode makes the slash CAPF the ONLY completion source.
+          (should (equal (list #'hermes-comint-bench--slash-complete)
+                         completion-at-point-functions))
+          (hermes-bench-test--seed-catalog parent)
+          (hermes-bench-test--type-input (current-buffer) "/cle")
+          (let* ((result (hermes-comint-bench--slash-complete))
+                 (p (marker-position hermes-comint--prompt-start))
+                 (input-start (+ p (length hermes-comint--prompt-string))))
+            (should result)
+            (should (= input-start (nth 0 result)))
+            (should (= (point) (nth 1 result)))
+            (should (member "/clear" (nth 2 result)))))
+      (when (buffer-live-p parent) (kill-buffer parent)))))
+
+(ert-deftest hermes-bench-test/capf-nil-before-slash-conversation ()
+  "No slash menu when conversation input does not start with `/'."
+  (let* ((pair (hermes-bench-test--make-parent))
+         (parent (car pair))
+         (sid (cdr pair)))
+    (unwind-protect
+        (with-temp-buffer
+          (hermes-comint-mode)
+          (setq-local hermes--current-session-id sid)
+          (hermes-bench-test--type-input (current-buffer) "hello")
+          (should-not (hermes-comint-bench--slash-complete)))
+      (when (buffer-live-p parent) (kill-buffer parent)))))
+
 ;;;; Bench mode reducer no-ops
 
 (ert-deftest hermes-bench-test/load-from-state-no-op ()
