@@ -693,18 +693,6 @@ and writes the error text to the log."
                                                        "output" "?")))))
     (should (eq s0 s1))))
 
-(ert-deftest hermes-state-test/tool-progress-updates-persistent-preview ()
-  (let* ((s (hermes-test--reduce*
-             nil
-             (cons "message.start" nil)
-             (cons "tool.generating"
-                   (hermes-test--ht "tool_id" "t1" "name" "bash"))
-             (cons "tool.progress"
-                   (hermes-test--ht "tool_id" "t1" "preview" "ls /tmp"))))
-         (seg (aref (hermes-stream-segments (hermes-state-stream s)) 0))
-         (tool (hermes-segment-content seg)))
-    (should (equal "ls /tmp" (hermes-tool-preview tool)))))
-
 (ert-deftest hermes-state-test/tool-complete-stores-summary ()
   "Gateway-provided `summary' is extracted into the tool struct."
   (let* ((s (hermes-test--reduce*
@@ -719,6 +707,93 @@ and writes the error text to the log."
          (seg (aref (hermes-stream-segments (hermes-state-stream s)) 0))
          (tool (hermes-segment-content seg)))
     (should (equal "Did 3 searches" (hermes-tool-summary tool)))))
+
+(ert-deftest hermes-state-test/tool-complete-extracts-output-from-result ()
+  "Live gateway shape: stdout lives in the JSON `result' envelope, not in
+an `output' key.  terminal returns {output, exit_code, error}."
+  (let* ((res (hermes-test--ht "output" "hello stdout\n"
+                               "exit_code" 0
+                               "error" nil))
+         (s (hermes-test--reduce*
+             nil
+             (cons "message.start" nil)
+             (cons "tool.generating"
+                   (hermes-test--ht "tool_id" "t1" "name" "terminal"))
+             (cons "tool.start"
+                   (hermes-test--ht "tool_id" "t1" "name" "terminal"
+                                    "context" "echo hello stdout"))
+             (cons "tool.complete"
+                   (hermes-test--ht "tool_id" "t1" "name" "terminal"
+                                    "result" res))))
+         (seg (aref (hermes-stream-segments (hermes-state-stream s)) 0))
+         (tool (hermes-segment-content seg)))
+    (should (equal "hello stdout\n" (hermes-tool-output tool)))
+    (should (eq 'complete (hermes-tool-status tool)))))
+
+(ert-deftest hermes-state-test/tool-complete-result-error-marks-error ()
+  "An error string inside the `result' envelope flips the tool to ERROR."
+  (let* ((res (hermes-test--ht "output" ""
+                               "exit_code" 124
+                               "error" "Command timed out after 30 seconds"))
+         (s (hermes-test--reduce*
+             nil
+             (cons "message.start" nil)
+             (cons "tool.generating"
+                   (hermes-test--ht "tool_id" "t1" "name" "terminal"))
+             (cons "tool.complete"
+                   (hermes-test--ht "tool_id" "t1" "name" "terminal"
+                                    "result" res))))
+         (seg (aref (hermes-stream-segments (hermes-state-stream s)) 0))
+         (tool (hermes-segment-content seg)))
+    (should (eq 'error (hermes-tool-status tool)))
+    (should (equal "Command timed out after 30 seconds" (hermes-tool-error tool)))))
+
+(ert-deftest hermes-state-test/tool-complete-explicit-output-wins ()
+  "A literal `output' key (legacy shape) outranks the result envelope."
+  (let* ((res (hermes-test--ht "output" "from-result"
+                               "exit_code" 0))
+         (s (hermes-test--reduce*
+             nil
+             (cons "message.start" nil)
+             (cons "tool.generating"
+                   (hermes-test--ht "tool_id" "t1" "name" "terminal"))
+             (cons "tool.complete"
+                   (hermes-test--ht "tool_id" "t1" "name" "terminal"
+                                    "output" "legacy-output"
+                                    "result" res))))
+         (seg (aref (hermes-stream-segments (hermes-state-stream s)) 0))
+         (tool (hermes-segment-content seg)))
+    (should (equal "legacy-output" (hermes-tool-output tool)))))
+
+(ert-deftest hermes-state-test/tool-complete-result-text-fallback ()
+  "Verbose sessions' `result_text' backs the output when result is opaque."
+  (let* ((s (hermes-test--reduce*
+             nil
+             (cons "message.start" nil)
+             (cons "tool.generating"
+                   (hermes-test--ht "tool_id" "t1" "name" "terminal"))
+             (cons "tool.complete"
+                   (hermes-test--ht "tool_id" "t1" "name" "terminal"
+                                    "result_text" "verbose tail"))))
+         (seg (aref (hermes-stream-segments (hermes-state-stream s)) 0))
+         (tool (hermes-segment-content seg)))
+    (should (equal "verbose tail" (hermes-tool-output tool)))))
+
+(ert-deftest hermes-state-test/tool-complete-string-result-no-output ()
+  "A plain-string (non-JSON) result carries no `output' envelope — the
+tool completes with nil output and the summary/inline-diff still render."
+  (let* ((s (hermes-test--reduce*
+             nil
+             (cons "message.start" nil)
+             (cons "tool.generating"
+                   (hermes-test--ht "tool_id" "t1" "name" "terminal"))
+             (cons "tool.complete"
+                   (hermes-test--ht "tool_id" "t1" "name" "terminal"
+                                    "result" "just a string"))))
+         (seg (aref (hermes-stream-segments (hermes-state-stream s)) 0))
+         (tool (hermes-segment-content seg)))
+    (should (null (hermes-tool-output tool)))
+    (should (eq 'complete (hermes-tool-status tool)))))
 
 (ert-deftest hermes-state-test/tool-complete-stores-inline-diff ()
   (let* ((s (hermes-test--reduce*
@@ -770,27 +845,6 @@ Gateway shape: list of hash-tables with \"content\" / \"status\" / \"id\"."
     (should (eq 'running (hermes-tool-status tool)))
     (should (= 1 (length (hermes-tool-todos tool))))
     (should (equal "pending"
-                   (gethash "status" (car (hermes-tool-todos tool)))))))
-
-(ert-deftest hermes-state-test/tool-progress-updates-todos ()
-  "tool.progress with todos payload updates the running tool in place."
-  (let* ((before (hermes-test--ht "content" "x" "status" "pending"     "id" "p1"))
-         (after  (hermes-test--ht "content" "x" "status" "in_progress" "id" "p1"))
-         (s (hermes-test--reduce*
-             nil
-             (cons "message.start" nil)
-             (cons "tool.generating"
-                   (hermes-test--ht "tool_id" "t1" "name" "todo"))
-             (cons "tool.start"
-                   (hermes-test--ht "tool_id" "t1"
-                                    "todos" (list before)))
-             (cons "tool.progress"
-                   (hermes-test--ht "tool_id" "t1"
-                                    "preview" "running"
-                                    "todos" (list after)))))
-         (seg (aref (hermes-stream-segments (hermes-state-stream s)) 0))
-         (tool (hermes-segment-content seg)))
-    (should (equal "in_progress"
                    (gethash "status" (car (hermes-tool-todos tool)))))))
 
 (ert-deftest hermes-state-test/tools-commit-with-message ()
@@ -1128,30 +1182,6 @@ must still resolve the name-keyed placeholder."
 
 ;;;; UI reducer for tools
 
-(ert-deftest hermes-state-test/ui-tool-progress-updates-preview ()
-  (let* ((s1 (hermes--ui-reduce nil
-                                (cons "tool.progress"
-                                      (hermes-test--ht "tool_id" "t1"
-                                                       "preview" "ls /tmp"))))
-         (s2 (hermes--ui-reduce s1
-                                (cons "tool.progress"
-                                      (hermes-test--ht "tool_id" "t1"
-                                                       "preview" "ls /var")))))
-    (should (equal "ls /var"
-                   (alist-get "t1" (hermes-ui-state-tool-previews s2)
-                              nil nil #'equal)))))
-
-(ert-deftest hermes-state-test/ui-tool-complete-clears-preview ()
-  (let* ((s1 (hermes--ui-reduce nil
-                                (cons "tool.progress"
-                                      (hermes-test--ht "tool_id" "t1"
-                                                       "preview" "ls"))))
-         (s2 (hermes--ui-reduce s1
-                                (cons "tool.complete"
-                                      (hermes-test--ht "tool_id" "t1")))))
-    (should (null (alist-get "t1" (hermes-ui-state-tool-previews s2)
-                             nil nil #'equal)))))
-
 (ert-deftest hermes-state-test/ui-tool-generating-sets-status ()
   (let ((s (hermes--ui-reduce nil
                               (cons "tool.generating"
@@ -1389,7 +1419,7 @@ must still resolve the name-keyed placeholder."
   (let* ((tool (make-hermes-tool
                 :id "t1" :name "Read" :status 'complete
                 :context "{\"file\":\"x.py\"}"
-                :preview nil :inline-diff "- a\n+ b"
+                :inline-diff "- a\n+ b"
                 :todos '((:text "fix" :done t))
                 :output "OK" :summary "Read 1 file" :error nil :duration 0.5))
          (msg (make-hermes-message
@@ -1603,19 +1633,6 @@ must still resolve the name-keyed placeholder."
          (tool (hermes-segment-content seg)))
     (should (equal "ls /tmp" (hermes-tool-context tool)))))
 
-(ert-deftest hermes-state-test/tool-progress-strips-ansi-preview ()
-  (let* ((s (hermes-test--reduce*
-             nil
-             (cons "message.start" nil)
-             (cons "tool.generating"
-                   (hermes-test--ht "tool_id" "t1" "name" "bash"))
-             (cons "tool.progress"
-                   (hermes-test--ht "tool_id" "t1"
-                                    "preview" "\e[32mrunning\e[0m"))))
-         (seg (aref (hermes-stream-segments (hermes-state-stream s)) 0))
-         (tool (hermes-segment-content seg)))
-    (should (equal "running" (hermes-tool-preview tool)))))
-
 (ert-deftest hermes-state-test/tool-complete-strips-ansi ()
   "Reducer strips ANSI from inline_diff, output, summary, and error."
   (let* ((s (hermes-test--reduce*
@@ -1636,15 +1653,6 @@ must still resolve the name-keyed placeholder."
     (should (equal "done" (hermes-tool-output tool)))
     (should (equal "wrote 1 file" (hermes-tool-summary tool)))
     (should (equal "warn" (hermes-tool-error tool)))))
-
-(ert-deftest hermes-state-test/ui-tool-progress-strips-ansi-preview ()
-  "UI reducer strips ANSI from preview before storing in tool-previews."
-  (let* ((s (hermes--ui-reduce nil
-              (cons "tool.progress"
-                    (hermes-test--ht "tool_id" "t1"
-                                     "preview" "\e[32mhello\e[0m"))))
-         (previews (hermes-ui-state-tool-previews s)))
-    (should (equal "hello" (cdr (assoc "t1" previews))))))
 
 (ert-deftest hermes-state-test/subagent-complete-after-commit-updates-turns ()
   "delegate_task is async: after the turn commits (stream nil'd), late

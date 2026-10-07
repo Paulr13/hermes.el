@@ -37,7 +37,6 @@
     ;; Tools
     "tool.generating"        ; {name, tool_id}
     "tool.start"             ; {tool_id, name, context}
-    "tool.progress"          ; {name, tool_id, preview}
     "tool.complete"          ; {name, tool_id, output, error?, exit_code?, duration_s?}
     ;; Subagents
     "subagent.spawn_requested"  ; {subagent_id, goal}

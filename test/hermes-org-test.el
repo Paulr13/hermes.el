@@ -855,8 +855,8 @@ formatter-display
 
 (ert-deftest hermes-org-test/parse-tool-no-meta-fallback ()
   "Parser never reads :tool-calls from any meta drawer — even when a
-meta drawer is present with stale :preview/:summary, the tool segment
-is built only from heading properties + body.  :preview is always nil on resume."
+meta drawer is present with stale :summary, the tool segment
+is built only from heading properties + body."
   (hermes-org-test--with-buffer
    "* chat :hermes:
 ** A: ok
@@ -873,15 +873,13 @@ is built only from heading properties + body.  :preview is always nil on resume.
 :TOOL_SUMMARY: from-property
 :END:
 :HERMES_META:
-(:tool-calls [(:id \"t1\" :preview \"stale-preview\" :summary \"from-meta\")])
+(:tool-calls [(:id \"t1\" :summary \"from-meta\")])
 :END:
 "
    (hermes-org-test--at-first-turn)
    (let* ((msg (hermes--parse-turn-at-point))
           (tool (hermes-segment-content
                  (aref (hermes-message-segments msg) 0))))
-     ;; :preview is ephemeral — never sourced from meta.
-     (should (null (hermes-tool-preview tool)))
      ;; :summary comes from the heading property, not meta.
      (should (equal "from-property" (hermes-tool-summary tool))))))
 

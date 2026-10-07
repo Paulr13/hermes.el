@@ -8,6 +8,7 @@
 #   ./test/live/run.sh live-e2e               # terminal tool + subagent round-trip
 #   ./test/live/run.sh live-e2e-prompts 400   # approval + clarify round-trips
 #   ./test/live/run.sh live-e2e-multisession  # side-by-side two-session streaming
+#   ./test/live/run.sh live-e2e-tool-stream   # no mid-run tool output (tool.progress dead)
 #
 # Env overrides:
 #   LIVE_E2E_PYTHON   gateway python (default HERMES_DEV_PYTHON, then
