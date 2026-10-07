@@ -16,6 +16,11 @@
 ;;   `hermes-rpc-long-handlers').
 ;; - Incoming notifications (method = "event") are routed to
 ;;   `hermes-rpc-event-functions'.
+;; - Incoming server→client requests (method + `srq-*' id: approval,
+;;   clarify, sudo, secret, vault prompts) go to
+;;   `hermes-rpc-server-request-functions'; the client answers with a
+;;   response frame via `hermes-rpc-respond'.  The connection advertises
+;;   `client.capabilities {server_requests: t}' on `gateway.ready'.
 ;; - The subprocess's stderr is collected into a separate buffer and
 ;;   surfaced through `hermes-rpc-stderr-functions'.
 ;; - JSON-RPC error frames go to the request's callback with an error
@@ -82,6 +87,13 @@ If nil, inherits Emacs's `default-directory' at spawn time."
 (defvar hermes-rpc-event-functions nil
   "Hook of (TYPE SESSION-ID PAYLOAD) called for every incoming event.
 TYPE is a string from `hermes-events-incoming'.  PAYLOAD is a hash table.")
+
+(defvar hermes-rpc-server-request-functions nil
+  "Hook of (METHOD ID PARAMS) called for every server→client request.
+The gateway writes approval/clarify/sudo/secret/vault prompts as
+JSON-RPC requests (see `hermes-events-server-requests') and waits for
+a response frame with the same id — answer via `hermes-rpc-respond'
+or `hermes-rpc-respond-error'.  ID is the `srq-*' string.")
 
 (defvar hermes-rpc-stderr-functions nil
   "Hook of (LINE) called for each stderr line from the gateway.")
@@ -251,37 +263,75 @@ arrives."
      (message "hermes-rpc: bad JSON (%s)" (error-message-string err)))))
 
 (defun hermes-rpc--dispatch-frame (frame)
-  "Route FRAME (a hash-table) to a request callback or an event handler."
-  (cond
-   ;; Response to a request we sent
-   ((gethash "id" frame)
-    (let* ((id (gethash "id" frame))
-           (cb (gethash id hermes-rpc--pending)))
-      (when cb
-        (remhash id hermes-rpc--pending)
-        (let ((result (gethash "result" frame))
-              (error  (gethash "error"  frame)))
-          (condition-case err
-              (funcall cb result error)
-            (error (message "hermes-rpc: callback failed: %s"
-                            (error-message-string err))))))))
-   ;; Server-initiated notification (event)
-   ((equal (gethash "method" frame) "event")
-    (let* ((params  (gethash "params" frame))
-           (type    (and params (gethash "type" params)))
-           (sid     (and params (gethash "session_id" params)))
-           (payload (and params (gethash "payload" params))))
-      ;; `gateway.ready' is the transition that lets us send buffered
-      ;; frames.  Do this BEFORE the user-facing hook so subscribers see
-      ;; an already-ready state.
-      (when (and (equal type "gateway.ready")
-                 (eq hermes-rpc--state 'starting))
-        (setq hermes-rpc--state 'ready)
-        (hermes-rpc--flush-pending))
-      (when type
-        (run-hook-with-args 'hermes-rpc-event-functions type sid payload))))
-   (t
-    (message "hermes-rpc: unrecognised frame: %S" frame))))
+  "Route FRAME (a hash-table) to a server request, a callback, or an event handler."
+  (let ((method (gethash "method" frame))
+        (id     (gethash "id" frame)))
+    (cond
+     ;; Server→client request: the gateway asks a question (approval,
+     ;; clarify, sudo, secret, vault prompts, …) and waits for a response
+     ;; frame with the same id.  Responses to OUR requests never carry a
+     ;; method, so this branch cannot swallow them.
+     ((and method (not (equal method "event")) id)
+      (run-hook-with-args 'hermes-rpc-server-request-functions
+                          method id (gethash "params" frame)))
+     ;; Response to a request we sent
+     (id
+      (let ((cb (gethash id hermes-rpc--pending)))
+        (when cb
+          (remhash id hermes-rpc--pending)
+          (let ((result (gethash "result" frame))
+                (error  (gethash "error"  frame)))
+            (condition-case err
+                (funcall cb result error)
+              (error (message "hermes-rpc: callback failed: %s"
+                              (error-message-string err))))))))
+     ;; Server-initiated notification (event)
+     ((equal method "event")
+      (let* ((params  (gethash "params" frame))
+             (type    (and params (gethash "type" params)))
+             (sid     (and params (gethash "session_id" params)))
+             (payload (and params (gethash "payload" params))))
+        ;; `gateway.ready' is the transition that lets us send buffered
+        ;; frames.  Do this BEFORE the user-facing hook so subscribers see
+        ;; an already-ready state.
+        (when (and (equal type "gateway.ready")
+                   (eq hermes-rpc--state 'starting))
+          (setq hermes-rpc--state 'ready)
+          ;; Advertise this connection as one that answers server→client
+          ;; requests BEFORE flushing buffered frames, so an approval that
+          ;; fires during startup is sent instead of failed fast.  The
+          ;; reply lists every request method the build supports.
+          (hermes-rpc-request "client.capabilities" (list :server_requests t))
+          (hermes-rpc--flush-pending))
+        (when type
+          (run-hook-with-args 'hermes-rpc-event-functions type sid payload))))
+     (t
+      (message "hermes-rpc: unrecognised frame: %S" frame)))))
+
+;;;; Server→client request responses
+
+(defun hermes-rpc--response-frame (id result)
+  "Return the JSON-RPC response frame plist answering server request ID with RESULT."
+  (list :jsonrpc "2.0" :id id :result result))
+
+(defun hermes-rpc--error-frame (id code message)
+  "Return the JSON-RPC error response frame plist for ID with CODE and MESSAGE."
+  (list :jsonrpc "2.0" :id id
+        :error (list :code code :message message)))
+
+(defun hermes-rpc-respond (id result)
+  "Answer the server→client request ID with RESULT (a JSON value).
+A response for an id the gateway no longer waits on is dropped
+server-side; a dead gateway silently skips the write."
+  (when (hermes-rpc-live-p)
+    (hermes-rpc--send (hermes-rpc--response-frame id result))))
+
+(defun hermes-rpc-respond-error (id code message)
+  "Answer the server→client request ID with a JSON-RPC error CODE/MESSAGE.
+Windows that don't show the session decline with code 4404; see
+tui_gateway/server_requests.py (`NOT_SHOWN_CODE')."
+  (when (hermes-rpc-live-p)
+    (hermes-rpc--send (hermes-rpc--error-frame id code message))))
 
 ;;;; Sentinel and stderr
 

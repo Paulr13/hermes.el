@@ -8,8 +8,12 @@
 
 ;; Watches the persistent state's `pending' slot.  When it becomes non-nil,
 ;; schedules a minibuffer interaction (via `run-at-time' 0 so the renderer
-;; finishes its work first), then dispatches the matching `.respond' RPC
-;; and clears the pending slot.
+;; finishes its work first), then answers the gateway's server→client
+;; request with a response frame (`hermes-rpc-respond') and clears the
+;; pending slot.  The gateway sends every prompt as a JSON-RPC request
+;; (`approval'/`clarify'/`sudo'/`secret' — see `hermes-events-server-requests');
+;; there are no `*.respond' RPCs anymore.  `request.cancel' events clear a
+;; matching card via the reducer.
 
 ;;; Code:
 
@@ -74,8 +78,9 @@ the buffer that will run the minibuffer interaction."
 ;;;; Approval
 
 (defun hermes--prompt-approval (sid rid payload)
-  "Ask the user to allow/deny a tool call, then dispatch `approval.respond'.
-Canonical choices match the TUI: once, session, always, deny."
+  "Ask the user to allow/deny a tool call, then respond to the request RID.
+Canonical choices match the TUI: once, session, always, deny.  SID is
+unused (the response frame carries the id, not the session)."
   (let* ((cmd (hermes--prompts-get payload "command"))
          (desc (hermes--prompts-get payload "description"))
          (prompt (format "Approve%s%s? "
@@ -95,42 +100,72 @@ Canonical choices match the TUI: once, session, always, deny."
                  (?s "session")
                  (?a "always")
                  (_  "deny"))))
-    (hermes--request
-     "approval.respond"
-     (list :session_id sid :request_id rid :choice resp))))
+    (hermes-rpc-respond rid (list :choice resp))))
 
 ;;;; Clarify
 
+(defun hermes--prompt-choices (payload key)
+  "Read KEY from PAYLOAD as a list of choice strings (vector or list)."
+  (let ((c (hermes--prompts-get payload key)))
+    (cond ((vectorp c) (append c nil))
+          ((listp c) c)
+          (t nil))))
+
 (defun hermes--prompt-clarify (rid payload)
-  "Show the question, let the user pick from choices or free-type."
-  (let* ((question (or (hermes--prompts-get payload "question") "Clarify:"))
-         (choices  (let ((c (hermes--prompts-get payload "choices")))
-                     (cond ((vectorp c) (append c nil))
-                           ((listp c) c)
-                           (t nil))))
-         (answer (if choices
-                     (completing-read (concat question " ") choices nil nil)
-                   (read-string (concat question " ")))))
-    (hermes--request "clarify.respond"
-                        (list :request_id rid :answer answer))))
+  "Ask each clarify question of the batch, then respond to request RID.
+The frame carries a `questions' list ({qid, question, choices}); the
+response frame answers with `{answers: {qid: str}}' in one shot.
+Quitting (C-g) cancels the whole request: a response frame without
+`answers' is cancel-all per the gateway contract.  The per-question
+lock alternative is the `clarify.lock' RPC — the Emacs client doesn't
+use it, answers go out atomically."
+  (let* ((questions (hermes--prompt-choices payload "questions"))
+         (answers   (make-hash-table :test 'equal))
+         ;; t when the user quit mid-batch: respond cancel-all below.
+         (cancelled (catch 'cancel
+                      (dolist (q questions)
+                        (let* ((qid (hermes--prompts-get q "qid"))
+                               (question (or (hermes--prompts-get q "question") "Clarify:"))
+                               (answer
+                                (condition-case _
+                                    (let ((choices (hermes--prompt-choices q "choices")))
+                                      (if choices
+                                          (completing-read (concat question " ") choices nil nil)
+                                        (read-string (concat question " "))))
+                                  (quit (throw 'cancel t)))))
+                          (puthash qid answer answers)))
+                      ;; The batch contract is `{answers: {qid: str}}' — a
+                      ;; frame whose result LACKS the `answers' key is
+                      ;; cancel-all (server_requests.resolve_response wraps
+                      ;; the queue's locked set as outcome "cancelled").
+                      ;; Sending the bare {qid: answer} hash read as a
+                      ;; cancellation and lost the user's every answer.
+                      (if questions
+                          (hermes-rpc-respond rid (list :answers answers))
+                        ;; Degenerate: nothing was asked; an empty frame
+                        ;; settles the request as cancel-all.
+                        (hermes-rpc-respond rid (make-hash-table :test 'equal)))
+                      nil)))
+    (when cancelled
+      ;; Nothing was answered: a frame without `answers' cancels the
+      ;; request on the gateway side.
+      (hermes-rpc-respond rid (make-hash-table :test 'equal)))))
 
 ;;;; Sudo / secret
 
 (defun hermes--prompt-sudo (rid)
-  "Read a sudo password and dispatch `sudo.respond'."
+  "Read a sudo password and respond to request RID with `{value}'."
   (let ((pw (read-passwd "sudo password: ")))
-    (hermes--request "sudo.respond"
-                        (list :request_id rid :password pw))))
+    (hermes-rpc-respond rid (list :value pw))))
 
 (defun hermes--prompt-secret (rid payload)
-  "Read a secret value and dispatch `secret.respond'."
+  "Read a secret value and respond to request RID with `{value}'."
   (let* ((var (hermes--prompts-get payload "env_var"))
          (hint (or (hermes--prompts-get payload "prompt")
                    (and var (format "Value for %s: " var))
                    "Secret: "))
          (val (read-passwd hint)))
-    (hermes--request "secret.respond"
-                        (list :request_id rid :value val))))
+    (hermes-rpc-respond rid (list :value val))))
 
 (provide 'hermes-prompts)
 ;;; hermes-prompts.el ends here

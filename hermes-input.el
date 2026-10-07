@@ -300,9 +300,20 @@ remains correct under the global state-change-hook."
         ((vectorp p) (aref p 0))
         ((consp p)   (car p))))
 
+(defconst hermes-input--usage-suffix-placeholder "slash.shared.usage_suffix"
+  "Unresolved i18n key the live catalog emits as a description.
+The gateway's `commands.catalog' (verified against a real gateway
+2026-10) carries this literal for 64 of 279 pairs — commands whose only
+description is a usage line behind an untranslated key.  Filtered from
+completion annotations and doc buffers so completion never advertises
+the junk key.")
+
 (defun hermes-input--pair-desc (p)
-  (cond ((vectorp p) (and (> (length p) 1) (aref p 1)))
-        ((consp p)  (cdr-safe p))))
+  (let ((raw (cond ((vectorp p) (and (> (length p) 1) (aref p 1)))
+                   ((consp p)  (cdr-safe p)))))
+    (and (stringp raw) (not (string-empty-p raw))
+         (not (equal raw hermes-input--usage-suffix-placeholder))
+         raw)))
 
 (defun hermes-input--slash-doc-buffer (candidate catalog)
   "Return a buffer with the description of CANDIDATE from CATALOG, or nil."
@@ -456,6 +467,47 @@ popped — the user can later attach via `hermes' or `hermes-section'."
                 (buffer-local-value 'hermes--current-session-id buf)))
            (hermes-input--send-1 text)))))))
 
+;;;; M-x wrappers for useful gateway slashes
+;;
+;; Thin convenience commands that COMPOSE slash text and hand it to
+;; `hermes-send' — the gateway's own slash.exec pipeline renders the
+;; answer (worker output, dispatch directives, warnings).  Nothing
+;; here shadows a real gateway slash (see docs/16-slash-audit.md).
+;; `/save' grammar verified against the gateway registry
+;; (hermes_cli.session_export SAVE_USAGE): /save <format> [filename]
+;; [redact], formats json/md/html, redact = bare trailing keyword,
+;; filename reduced to a basename (the gateway ignores path parts).
+
+(defun hermes-usage ()
+  "Show the gateway's `/usage' report for the current session."
+  (interactive)
+  (hermes-send "/usage"))
+
+(defun hermes-model ()
+  "Run the gateway's `/model' slash (renders its listing/picker text).
+For interactive model switching with a live provider list prefer
+`hermes-set-model', which drives config RPCs directly."
+  (interactive)
+  (hermes-send "/model"))
+
+(defun hermes-save (format filename &optional redact)
+  "Export the current session via the gateway `/save' slash.
+FORMAT is completed over the gateway's formats (json, md, html).
+FILENAME, when non-empty, is the output name — reduced to its
+basename, since the gateway discards path separators; empty uses
+the gateway's auto-named file.  Prefix arg REDACT appends the
+`redact' keyword to scrub secrets from the export."
+  (interactive
+   (list (completing-read "Export format: " '("json" "md" "html")
+                          nil t nil nil "json")
+         (read-string "Output filename (RET for auto): ")
+         current-prefix-arg))
+  (hermes-send
+   (concat "/save " format
+           (and filename (not (string-empty-p filename))
+                (format " %s" (file-name-nondirectory filename)))
+           (when redact " redact"))))
+
 ;;;; Shell interpolation — !cmd and $(cmd)
 
 (defun hermes-input--shell-matches (text)
@@ -518,9 +570,133 @@ Substitutions are applied right-to-left to preserve byte offsets."
                   (with-current-buffer buf (funcall k expanded))
                 (funcall k expanded))))))))))
 
-(defun hermes-input--send-1 (text)
+;;;; Slash result handling — slash.exec / command.dispatch responses
+;;
+;; Wire contract (tui_gateway SlashExecResult): plain worker/plugin text
+;; in `output' (+ `warning'), OR — when the gateway rerouted the command
+;; to `command.dispatch' (pending-input builtins like retry/steer/undo,
+;; bundles, skills) — a directive: `type' send/alias/skill/prefill/exec
+;; with `message' (text the UI must submit or prefill), `target',
+;; `notice' and `display' (UIs render display/notice, never message).
+;; The gateway also answers 4018 "skill command: use command.dispatch
+;; for /x" when a skill slug must go through the dispatch path.
+
+(defconst hermes-input--slash-max-depth 2
+  "Max chained re-dispatch hops per slash input (send message, alias
+target, 4018 retry).  Guards against gateway alias loops; plain worker
+responses never recurse.")
+
+(defun hermes-input--slash-nonempty (v)
+  "Return V when it is a non-empty string."
+  (and (stringp v) (not (string-empty-p v)) v))
+
+(defun hermes-input--slash-emit (buf sid text)
+  "Dispatch TEXT as a system message into BUF under session SID."
+  (when (and (stringp text) (not (string-empty-p text)) (buffer-live-p buf))
+    (with-current-buffer buf
+      (hermes-dispatch (cons :system-message (list :text text)) sid))))
+
+(defun hermes-input--slash-command-parts (cmd)
+  "Split CMD (leading slash already stripped) into (BASE . ARG)."
+  (if (string-match "\\`\\([^ \t]+\\)\\(?:[ \t]+\\(.*\\)\\)?\\'" cmd)
+      (cons (match-string 1 cmd)
+            (hermes-input--slash-nonempty (match-string 2 cmd)))
+    (cons cmd nil)))
+
+(defun hermes-input--slash-directive-note (result)
+  "Concatenated notice/display lines from a dispatch RESULT, or nil."
+  (let (parts)
+    (dolist (key '("notice" "display"))
+      (let ((v (hermes-input--slash-nonempty (hermes--get result key))))
+        (when v (setq parts (append parts (list v))))))
+    (and parts (mapconcat #'identity parts "\n"))))
+
+(defun hermes-input--slash-redispatch (text sid buf depth)
+  "Re-run TEXT through the normal send path at DEPTH+1.
+Runs from an RPC callback, so the session id is rebound to SID inside
+BUF — same pattern as headless sends after `session.create' resolves."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (let ((hermes--current-session-id sid))
+        (hermes-input--send-1 text (1+ depth))))))
+
+(defun hermes-input--slash-command-dispatch (cmd sid buf depth)
+  "Retry CMD through `command.dispatch' (the 4018 skill/bundle gate)."
+  (let ((parts (hermes-input--slash-command-parts cmd)))
+    (hermes--request
+     "command.dispatch"
+     (list :session_id sid
+           :name  (car parts)
+           :arg   (or (cdr parts) ""))
+     (lambda (result error)
+       ;; Depth+1: a second 4018 from dispatch itself must not loop.
+       (hermes-input--slash-result cmd result error sid buf (1+ depth))))))
+
+(defun hermes-input--slash-result (cmd result error sid buf depth)
+  "Central handler for `slash.exec'/`command.dispatch' responses.
+CMD is the command text without the leading slash; SID and BUF the
+target session and originating buffer; DEPTH the re-dispatch depth.
+
+Renders worker output (+ the gateway's `warning'), then honors
+dispatch directives: send/skill submit their MESSAGE as a user turn
+(the TUI contract — without this nothing would ever reach the agent),
+alias re-runs the target command, prefill renders display-only in v1.
+Error 4018 (\"use command.dispatch\" for skills/bundles) auto-retries."
+  (cond
+   ((and (hash-table-p error)
+         (equal (gethash "code" error) 4018)
+         (< depth hermes-input--slash-max-depth))
+    (hermes-input--slash-command-dispatch cmd sid buf depth))
+   ((hash-table-p error)
+    (hermes-input--slash-emit
+     buf sid
+     (format "/%s: %s" cmd
+             (or (hermes-input--slash-nonempty (gethash "message" error))
+                 (format "%S" error)))))
+   (t
+    (let* ((type   (hermes--get result "type"))
+           (out    (hermes-input--slash-nonempty (hermes--get result "output")))
+           (warn   (hermes-input--slash-nonempty (hermes--get result "warning")))
+           (msg    (hermes-input--slash-nonempty (hermes--get result "message")))
+           (target (hermes--get result "target"))
+           (note   (hermes-input--slash-directive-note result))
+           (body   (cond ((and out warn) (concat out "\n⚠ " warn))
+                         (out out)
+                         (warn (concat "⚠ " warn)))))
+      (hermes-input--slash-emit buf sid (and body (ansi-color-apply body)))
+      (hermes-input--slash-emit buf sid (and note (ansi-color-apply note)))
+      (pcase type
+        ((or "send" "skill")
+         (cond
+          ((not msg)
+           (hermes-input--slash-emit
+            buf sid (format "/%s: no message to send" cmd)))
+          ((< depth hermes-input--slash-max-depth)
+           (hermes-input--slash-redispatch msg sid buf depth))
+          (t (hermes-input--slash-emit
+              buf sid (format "/%s: chain too deep, message not sent" cmd)))))
+        ("alias"
+         (let ((tgt (hermes-input--slash-nonempty target))
+               (arg (cdr (hermes-input--slash-command-parts cmd))))
+           (cond
+            ((not tgt)
+             (hermes-input--slash-emit
+              buf sid (format "/%s: alias without target" cmd)))
+            ((< depth hermes-input--slash-max-depth)
+             (hermes-input--slash-redispatch
+              (concat "/" tgt (and arg (concat " " arg))) sid buf depth))
+            (t (hermes-input--slash-emit
+                buf sid (format "/%s: alias chain too deep" cmd))))))
+        ;; "prefill": v1 renders only — comint prompt insertion is future
+        ;; work.  "exec"/plain worker replies rendered above.
+        (_ nil))))))
+
+
+(defun hermes-input--send-1 (text &optional depth)
   "Internal worker for `hermes-send'.  Assumes `(hermes--current-state)' and
-`hermes--current-session-id' are bound to the target session."
+`hermes--current-session-id' are bound to the target session.
+DEPTH counts chained re-dispatch hops (slash directives); the initial
+send is depth 0."
   ;; If the gateway died, offer to reconnect.  The text is committed and
   ;; queued; `hermes-reconnect' creates a fresh session and drains the head
   ;; once it lands.
@@ -579,28 +755,17 @@ Substitutions are applied right-to-left to preserve byte offsets."
            (hermes-input--try-session-slash text))
       nil)
      ;; Slash command — fire immediately, no transcript, no history.
+     ;; Responses land via `hermes-input--slash-result': worker output,
+     ;; dispatch directives (send/skill/alias/prefill), the 4018 skill
+     ;; gate retry, and gateway `warning's.
      ((eq (aref text 0) ?/)
-      (let ((buf (current-buffer)))
+      (let ((buf (current-buffer))
+            (cmd (substring text 1)))
         (hermes--request
          "slash.exec"
-         (list :session_id sid :command (substring text 1))
+         (list :session_id sid :command cmd)
          (lambda (result error)
-           (let* ((raw
-                   (cond
-                    (error
-                     (format "%s: %s" text
-                             (or (and (hash-table-p error)
-                                      (gethash "message" error))
-                                 (format "%S" error))))
-                    ((and (hash-table-p result)
-                          (let ((out (gethash "output" result)))
-                            (and out (not (string-empty-p out)) out))))))
-                  (msg (and raw (ansi-color-apply raw))))
-             (when (and msg (buffer-live-p buf))
-               (with-current-buffer buf
-                 (hermes-dispatch
-                  (cons :system-message (list :text msg))
-                  sid))))))))
+           (hermes-input--slash-result cmd result error sid buf (or depth 0))))))
      ;; Live turn → enqueue silently; the drain hook will display and
      ;; submit when the in-flight stream clears.  Optimistic commit here
      ;; would place the `* user:' heading at `point-max', which sits

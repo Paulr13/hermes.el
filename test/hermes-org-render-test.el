@@ -1332,16 +1332,15 @@ cap); attr_hermes preserves the real pixel dimensions."
     (should (string-match-p "^#\\+name: hermes-tool-bash-1-error$" out))
     (should (string-match-p "#\\+begin_example" out))))
 
-(ert-deftest hermes-render-test/tool-format-no-name-on-preview ()
-  "Running tools render the preview block with NO `#+name' marker for
-preview/output/error/inline-diff fields.  The `-context' marker is
+(ert-deftest hermes-render-test/tool-format-running-no-output-name ()
+  "Running tools render NO `#+name' marker for output/error/inline-diff
+fields (they only arrive at `tool.complete').  The `-context' marker is
 allowed (and required) — context is static, set at `tool.start', and
 the parser reads it unconditionally."
   (require 'hermes-tool-formatters)
   (let* ((tool (make-hermes-tool
                 :id "bash-1" :name "bash" :status 'running
-                :context "{\"command\":\"echo hi\"}"
-                :preview "hi"))
+                :context "{\"command\":\"echo hi\"}"))
          (out (plist-get (hermes-tool-format-bash tool) :body)))
     (should-not (string-match-p "^#\\+name: hermes-tool-bash-1-output$" out))
     (should-not (string-match-p "^#\\+name: hermes-tool-bash-1-error$" out))

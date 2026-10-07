@@ -612,8 +612,7 @@ not on a recognized turn heading."
                                  ;; body-canonical in #+name'd blocks; :todos
                                  ;; is body-canonical in a #+name'd Org table;
                                  ;; :summary and :name/:status/:duration live
-                                 ;; in heading properties.  :preview is
-                                 ;; ephemeral and nil on resume.  The parser
+                                 ;; in heading properties.  The parser
                                   ;; does not read :tool-calls from
                                   ;; any meta drawer — all tool data is
                                   ;; body-canonical or property-canonical.
@@ -635,7 +634,6 @@ not on a recognized turn heading."
                                                            (hermes--extract-named-block
                                                             body
                                                             (format "hermes-tool-%s-context" slug)))
-                                             :preview nil
                                              :inline-diff (and terminal-p slug
                                                                (hermes--extract-named-block
                                                                 body

@@ -72,11 +72,10 @@
   id name
   status      ; 'generating | 'running | 'complete | 'error
   context     ; tool args preview from tool.start
-  preview     ; live preview from tool.progress
   inline-diff ; diff output from tool.complete
   todos       ; list of hash-tables with "content" "status" "id" — from
-              ; tool.complete (and defensively tool.start/tool.progress
-              ; when the gateway forwards them earlier)
+              ; tool.complete (and defensively tool.start when the
+              ; gateway forwards them earlier)
   output      ; string or nil (raw tool result text — rarely populated)
   summary     ; string or nil (human summary from gateway, e.g. "Did 3 searches")
   error duration)
@@ -149,7 +148,6 @@
 (cl-defstruct (hermes-ui-state (:copier hermes-ui-state-copy))
   status-text status-kind
   spinner-frame
-  (tool-previews nil)   ; alist tool-id → preview string
   thinking-text)        ; accumulated thinking.delta text for current turn
 
 ;;;; Atoms and dispatchers
@@ -686,7 +684,6 @@ sites), latent risk if a future writer mutates the shared vector."
         :name (hermes-tool-name tool)
         :status (hermes-tool-status tool)
         :context (hermes-tool-context tool)
-        :preview (hermes-tool-preview tool)
         :inline-diff (hermes-tool-inline-diff tool)
         :todos (hermes--to-plist (hermes-tool-todos tool))
         :output (hermes-tool-output tool)
@@ -701,7 +698,6 @@ sites), latent risk if a future writer mutates the shared vector."
    :name (plist-get p :name)
    :status (plist-get p :status)
    :context (plist-get p :context)
-   :preview (plist-get p :preview)
    :inline-diff (plist-get p :inline-diff)
    :todos (plist-get p :todos)
    :output (plist-get p :output)
@@ -1353,32 +1349,6 @@ branching so they don't affect reducer determinism):
                    (setf (hermes-state-stream s)
                          (hermes--with-copy str hermes-stream-copy ns
                            (setf (hermes-stream-segments ns) new-segs))))))))))
-      ("tool.progress"
-       (let ((str (hermes-state-stream state))
-             (tid (hermes--get p "tool_id"))
-             (preview (hermes--strip-ansi (hermes--get p "preview")))
-             (todos-raw (hermes--get p "todos")))
-         (if (or (null str) (null tid))
-             state
-           (let* ((segs (hermes-stream-segments str))
-                  (idx (hermes--find-tool-segment-index
-                        segs tid (hermes--get p "name"))))
-             (if (null idx)
-                 state
-               (let* ((old-seg (aref segs idx))
-                      (old-tool (hermes-segment-content old-seg))
-                      (new-tool (hermes--with-copy old-tool hermes-tool-copy nt
-                                  (setf (hermes-tool-preview nt) preview)
-                                  (when todos-raw
-                                    (setf (hermes-tool-todos nt) todos-raw))))
-                      (new-seg (hermes--with-copy old-seg hermes-segment-copy ns
-                                 (setf (hermes-segment-content ns) new-tool)))
-                      (new-segs (copy-sequence segs)))
-                 (aset new-segs idx new-seg)
-                 (hermes--with-copy state hermes-state-copy s
-                   (setf (hermes-state-stream s)
-                         (hermes--with-copy str hermes-stream-copy ns
-                           (setf (hermes-stream-segments ns) new-segs))))))))))
       ("tool.complete"
        (let* ((str (hermes-state-stream state))
               (tid (or (hermes--get p "tool_id")
@@ -1392,9 +1362,23 @@ branching so they don't affect reducer determinism):
                                           (hermes-tool-id (hermes-segment-content last-seg)))))))))
               (inline-diff (hermes--strip-ansi (hermes--get p "inline_diff")))
               (todos-raw (hermes--get p "todos"))
-              (output (hermes--strip-ansi (hermes--get p "output")))
+              ;; The wire carries no `output' key: stdout lives inside the
+              ;; tool's JSON `result' envelope ({output, exit_code, error, …}
+              ;; for terminal-shaped tools); `result_text' backs verbose
+              ;; sessions.  An `output' key is honored first (legacy shape).
+              (result (hermes--get p "result"))
+              (res-output (and (hash-table-p result)
+                               (let ((v (gethash "output" result)))
+                                 (and (stringp v) (not (string-empty-p v)) v))))
+              (res-text (let ((v (hermes--get p "result_text")))
+                          (and (stringp v) (not (string-empty-p v)) v)))
+              (res-error (and (hash-table-p result)
+                              (let ((v (gethash "error" result)))
+                                (and (stringp v) (not (string-empty-p v)) v))))
+              (output (hermes--strip-ansi
+                       (or (hermes--get p "output") res-output res-text)))
               (summary (hermes--strip-ansi (hermes--get p "summary")))
-              (err    (hermes--strip-ansi (hermes--get p "error")))
+              (err    (or (hermes--strip-ansi (hermes--get p "error")) res-error))
               (dur    (hermes--get p "duration_s")))
          (if (or (null str) (null tid))
              state
@@ -1451,6 +1435,16 @@ branching so they don't affect reducer determinism):
                (make-hermes-pending :kind 'secret
                                     :request-id (hermes--get p "request_id")
                                     :payload p))))
+      ("request.cancel"
+       ;; An open server→client request was withdrawn (timeout / interrupt /
+       ;; another surface answered).  Tear our card down when it matches;
+       ;; other methods' cancels don't touch a pending prompt.
+       (let ((pend (hermes-state-pending state)))
+         (if (and pend
+                  (equal (hermes--get p "id") (hermes-pending-request-id pend)))
+             (hermes--with-copy state hermes-state-copy s
+               (setf (hermes-state-pending s) nil))
+           state)))
       (:system-message
        (let* ((text (plist-get p :text))
               (msg (make-hermes-message
@@ -1599,7 +1593,6 @@ branching so they don't affect reducer determinism):
       ("message.complete"
        (hermes--with-copy state hermes-ui-state-copy s
          (setf (hermes-ui-state-status-text s) nil
-               (hermes-ui-state-tool-previews s) nil
                (hermes-ui-state-thinking-text s) nil)))
        ("tool.generating"
         (let ((name (hermes--get p "name")))
@@ -1613,25 +1606,7 @@ branching so they don't affect reducer determinism):
             (setf (hermes-ui-state-status-text s)
                   (format "Running %s…" (or name "tool"))
                   (hermes-ui-state-thinking-text s) nil))))
-       ("tool.progress"
-        (let ((tid (hermes--get p "tool_id"))
-              (preview (hermes--strip-ansi (hermes--get p "preview"))))
-          (if (null tid)
-              state
-            (hermes--with-copy state hermes-ui-state-copy s
-              (setf (hermes-ui-state-tool-previews s)
-                    (cons (cons tid preview)
-                          (assoc-delete-all
-                           tid (hermes-ui-state-tool-previews state))))))))
-        ("tool.complete"
-         (let ((tid (hermes--get p "tool_id")))
-           (if (null tid)
-               state
-             (hermes--with-copy state hermes-ui-state-copy s
-               (setf (hermes-ui-state-tool-previews s)
-                     (assoc-delete-all
-                      tid (hermes-ui-state-tool-previews state)))))))
-        ("subagent.start"
+       ("subagent.start"
          (let ((goal (hermes--get p "goal")))
            (hermes--with-copy state hermes-ui-state-copy s
              (setf (hermes-ui-state-status-text s)
@@ -1648,7 +1623,6 @@ branching so they don't affect reducer determinism):
          (hermes--with-copy state hermes-ui-state-copy s
            (setf (hermes-ui-state-status-text s)
                  (or (hermes--get p "message") "(error)")
-                 (hermes-ui-state-tool-previews s) nil
                  (hermes-ui-state-thinking-text s) nil)))
         ("gateway.start_timeout"
          (hermes--with-copy state hermes-ui-state-copy s

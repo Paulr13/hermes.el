@@ -37,6 +37,17 @@ without this cache, the very first session would never see the skin.")
 
 ;;;; Routing: filter event → buffer
 
+(defconst hermes--server-request-legacy-events
+  '(("approval" . "approval.request")
+    ("clarify"  . "clarify.request")
+    ("sudo"     . "sudo.request")
+    ("secret"   . "secret.request"))
+  "Map server→client request METHOD to the event tag the reducer understands.
+The gateway no longer sends `*.request' events; reusing the reducer's
+tags keeps one pending-prompt shape.  Unmapped methods (vault.*, window
+reads) dispatch under their own name — the reducer's default case is a
+pass-through until a handler exists.")
+
 (defun hermes--route-event (type session-id payload)
   "Dispatch event TYPE/PAYLOAD into the session's state slot."
   (when (or (equal type "gateway.ready") (equal type "skin.changed"))
@@ -51,6 +62,26 @@ without this cache, the very first session would never see the skin.")
       (hermes-session--schedule-usage-poll session-id)))
    (t
     (hermes--broadcast-dispatch type payload))))
+
+(defun hermes--route-server-request (method id params)
+  "Dispatch a server→client request METHOD/ID into the session's state slot.
+PARAMS carries the session the question belongs to; the frame's `srq-*'
+id becomes the payload's `request_id', replacing the queue-local id the
+gateway embeds (only `approval.respond' ever needed that one)."
+  (let* ((sid (and (hash-table-p params) (gethash "session_id" params)))
+         (payload (when (hash-table-p params)
+                    (let ((copy (copy-hash-table params)))
+                      (remhash "session_id" copy)
+                      (puthash "request_id" id copy)
+                      copy))))
+    (if (and sid (not (string-empty-p sid)))
+        (let ((type (or (alist-get method hermes--server-request-legacy-events
+                                   nil nil #'equal)
+                        method)))
+          (hermes-dispatch (cons type payload) sid)
+          (hermes-ui-dispatch (cons type payload) sid))
+      (message "hermes-rpc: server request %s (id %s) without session_id"
+               method id))))
 
 (defun hermes--route-connection (state)
   "Broadcast a connection state change to every known session."
@@ -100,11 +131,13 @@ without this cache, the very first session would never see the skin.")
 (defun hermes--install-hooks ()
   "Wire RPC hooks once.  Truly idempotent — removes before adding."
   (remove-hook 'hermes-rpc-event-functions #'hermes--route-event)
+  (remove-hook 'hermes-rpc-server-request-functions #'hermes--route-server-request)
   (remove-hook 'hermes-rpc-connection-functions #'hermes--route-connection)
   (remove-hook 'hermes-rpc-stderr-functions #'hermes--route-stderr)
   (remove-hook 'hermes-rpc-protocol-error-functions #'hermes--route-protocol-error)
   (remove-hook 'hermes-rpc-start-timeout-functions #'hermes--route-start-timeout)
   (add-hook 'hermes-rpc-event-functions #'hermes--route-event)
+  (add-hook 'hermes-rpc-server-request-functions #'hermes--route-server-request)
   (add-hook 'hermes-rpc-connection-functions #'hermes--route-connection)
   (add-hook 'hermes-rpc-stderr-functions #'hermes--route-stderr)
   (add-hook 'hermes-rpc-protocol-error-functions #'hermes--route-protocol-error)

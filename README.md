@@ -83,6 +83,30 @@ In `~/.config/doom/config.el`:
 Full keybindings (Doom `SPC h` leader, Evil, etc.) and optional module details
 are in [`AGENTS.md`](AGENTS.md).
 
+## Live-gateway e2e
+
+Headless harnesses in `test/live/` spawn a REAL gateway (real model turns)
+and drive the production client code end-to-end — the parts the unit suite
+cannot cover: streaming, tool completion, subagents, prompt round-trips.
+
+```sh
+./test/live/run.sh live-e2e                 # terminal tool + subagent round-trip (~2-3 min)
+./test/live/run.sh live-e2e-prompts         # approval + clarify round-trips (~2 min)
+./test/live/run.sh live-e2e-multisession    # side-by-side two-session streaming (~30 s)
+```
+
+- The runner strips `HERMES_CRON_SESSION` / `HERMES_EXEC_ASK` / `HERMES_AGENT`
+  (cron-marked agents auto-deny approvals, so no prompt ever reaches the
+  client) and wraps emacs in `timeout` (default 560 s, second argument).
+- Env overrides: `LIVE_E2E_PYTHON` (gateway python, default
+  `HERMES_DEV_PYTHON` then `~/.hermes/venv-current/bin/python`) and
+  `LIVE_E2E_LOG` (result log, default under `temporary-file-directory`).
+- Only the human keystrokes are stubbed (`read-multiple-choice` /
+  `completing-read` / `read-string` advice); everything else is the real
+  client path. Results print as `RESULT key = value` lines plus a log tail.
+  Run the matching harness after any change to events / rendering / prompts
+  before claiming the change works.
+
 ## Docs
 
 - [`AGENTS.md`](AGENTS.md) — full setup, usage, keybindings, development

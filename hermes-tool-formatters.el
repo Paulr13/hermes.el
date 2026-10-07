@@ -187,14 +187,13 @@ empty or nil.  The `#+name' line is placed immediately before the
               block)
     block))
 
-(defun hermes-tool--output-or-preview (tool)
-  "Return OUTPUT if present, else PREVIEW, else nil."
-  (or (and (hermes-tool-output tool)
-           (not (string-empty-p (hermes-tool-output tool)))
-           (hermes-tool-output tool))
-      (and (hermes-tool-preview tool)
-           (not (string-empty-p (hermes-tool-preview tool)))
-           (hermes-tool-preview tool))))
+(defun hermes-tool--output (tool)
+  "Return TOOL's OUTPUT if present and non-empty, else nil.
+The gateway never streams mid-run previews (no `tool.progress' wire
+event exists); output arrives only at `tool.complete'."
+  (and (hermes-tool-output tool)
+       (not (string-empty-p (hermes-tool-output tool)))
+       (hermes-tool-output tool)))
 
 ;;;; Generic fallback formatter
 
@@ -202,7 +201,7 @@ empty or nil.  The `#+name' line is placed immediately before the
   "Default formatter.  Mirrors the legacy layout but without status-in-heading."
   (let* ((name    (or (hermes-tool-name tool) "tool"))
          (err     (hermes-tool-error tool))
-         (out     (hermes-tool--output-or-preview tool))
+         (out     (hermes-tool--output tool))
          (diff    (hermes-tool-inline-diff tool))
          (todos   (hermes-tool-todos tool))
          (body
@@ -225,7 +224,7 @@ empty or nil.  The `#+name' line is placed immediately before the
   (let* ((ctx (hermes-tool--parse-context (hermes-tool-context tool)))
          (cmd (or (hermes-tool--ctx-get ctx 'command 'cmd 'script) ""))
          (err (hermes-tool-error tool))
-         (out (hermes-tool--output-or-preview tool))
+         (out (hermes-tool--output tool))
          (lang (cond
                 ((string-match-p "\\`#!.*python" cmd) "python")
                 ((string-match-p "\\`#!.*\\(node\\|deno\\)" cmd) "js")
@@ -271,7 +270,7 @@ empty or nil.  The `#+name' line is placed immediately before the
                                (or (hermes-tool-context tool) "") path)
                            60)
                           range))
-         (out (hermes-tool--output-or-preview tool))
+         (out (hermes-tool--output tool))
          (err (hermes-tool-error tool)))
     (list :summary summary
           :body (concat
@@ -292,7 +291,7 @@ empty or nil.  The `#+name' line is placed immediately before the
          (path (or (hermes-tool--ctx-get ctx 'file_path 'path 'file) ""))
          (name (or (hermes-tool-name tool) "Edit"))
          (diff (hermes-tool-inline-diff tool))
-         (out  (hermes-tool--output-or-preview tool))
+         (out  (hermes-tool--output tool))
          (err  (hermes-tool-error tool))
          (summary (format "%s %s" name
                           (hermes-tool--truncate
@@ -325,7 +324,7 @@ empty or nil.  The `#+name' line is placed immediately before the
          (name (or (hermes-tool-name tool) "Grep"))
          (pattern (or (hermes-tool--ctx-get ctx 'pattern 'query 'regex) ""))
          (path (or (hermes-tool--ctx-get ctx 'path 'dir 'directory) ""))
-         (out (hermes-tool--output-or-preview tool))
+         (out (hermes-tool--output tool))
          (err (hermes-tool-error tool))
          (n-matches
           (and out (let ((lines (split-string out "\n" t)))
@@ -360,7 +359,7 @@ empty or nil.  The `#+name' line is placed immediately before the
 (defun hermes-tool-format-ls (tool)
   (let* ((ctx (hermes-tool--parse-context (hermes-tool-context tool)))
          (path (or (hermes-tool--ctx-get ctx 'path 'dir 'directory) ""))
-         (out (hermes-tool--output-or-preview tool))
+         (out (hermes-tool--output tool))
          (err (hermes-tool-error tool)))
     (list :summary (format "LS %s"
                            (hermes-tool--truncate
@@ -399,7 +398,7 @@ empty or nil.  The `#+name' line is placed immediately before the
          (name (or (hermes-tool-name tool) "Web"))
          (url (hermes-tool--ctx-get ctx 'url))
          (q   (hermes-tool--ctx-get ctx 'query 'q))
-         (out (hermes-tool--output-or-preview tool))
+         (out (hermes-tool--output tool))
          (err (hermes-tool-error tool))
          (summary
           (cond
@@ -425,7 +424,7 @@ empty or nil.  The `#+name' line is placed immediately before the
   (let* ((ctx (hermes-tool--parse-context (hermes-tool-context tool)))
          (desc (or (hermes-tool--ctx-get ctx 'description 'subagent_type 'goal)
                    ""))
-         (out (hermes-tool--output-or-preview tool))
+         (out (hermes-tool--output tool))
          (err (hermes-tool-error tool)))
     (list :summary (format "Agent: %s"
                            (hermes-tool--truncate
@@ -445,12 +444,13 @@ empty or nil.  The `#+name' line is placed immediately before the
 ;;;; Registration
 
 (hermes-tool--register "\\`Bash\\'"          #'hermes-tool-format-bash)
-;; Hermes agents name their shell tool `terminal'; the Claude-style
-;; names here never match it, so terminal calls fell to the generic
-;; formatter and showed neither the command nor a foldable body.
+;; Hermes agents name their shell tool `terminal' and their file tools
+;; `patch'/'write_file' (file_operations.py); the Claude-style names
+;; here never match them, so those calls fell to the generic formatter
+;; and showed neither the command/diff nor a foldable body.
 (hermes-tool--register "\\`terminal\\'"      #'hermes-tool-format-bash)
 (hermes-tool--register "\\`Read\\'"          #'hermes-tool-format-read)
-(hermes-tool--register "\\`\\(Edit\\|MultiEdit\\|Write\\)\\'"
+(hermes-tool--register "\\`\\(Edit\\|MultiEdit\\|Write\\|patch\\|write_file\\)\\'"
                        #'hermes-tool-format-edit)
 (hermes-tool--register "\\`\\(Grep\\|Glob\\)\\'"
                        #'hermes-tool-format-grep)
