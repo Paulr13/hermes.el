@@ -1575,12 +1575,12 @@ Projects from the same `turns' state as the org viewer.
   ;; idempotent per function, so per-buffer calls are fine.
   (require 'hermes-prompts)
   (add-hook 'hermes-state-change-hook #'hermes-prompts-watch t)
-  ;; Slash completion is the ONLY CAPF in hermes comint buffers (bench
-  ;; and conversation alike): the client never completes file names in
-  ;; the prompt, so plain text must not fall through to comint's file
-  ;; completion — "/" gets the slash menu, anything else gets nothing.
+  ;; Completion dispatch (bench and conversation alike): "/" at input
+  ;; start gets the slash menu, path-ish input (a "/" or "~" anywhere
+  ;; in what's typed) gets comint file completion, plain prose gets
+  ;; nothing — see `hermes-comint--complete-at-point'.
   (setq-local completion-at-point-functions
-              (list #'hermes-comint-bench--slash-complete))
+              (list #'hermes-comint--complete-at-point))
   (setq-local scroll-margin 0)
   (add-hook 'pre-command-hook #'hermes-comint--ensure-input-point nil t)
   (hermes-comint--setup))
@@ -1736,6 +1736,26 @@ Subscribed to `hermes-skin-applied-hook'."
             #'hermes-comint-bench--refresh-bg-all))
 
 ;;;; Bench: slash-command CAPF
+
+(defun hermes-comint--input-start-pos ()
+  "Return the buffer position where the writable input begins, or nil."
+  (let ((p (marker-position hermes-comint--prompt-start)))
+    (and p (+ p (length hermes-comint--prompt-string)))))
+
+(defun hermes-comint--complete-at-point ()
+  "TUI-style completion dispatch for hermes comint input.
+\"/\" as the first input character asks the gateway slash menu
+(`hermes-comint-bench--slash-complete').  Anything containing a
+\"/\" or \"~\" further in (text preceding the slash, a path after a
+command like \"/dir ~/x\") falls back to comint file completion.
+Plain prose completes nothing — never pops a menu."
+  (or (hermes-comint-bench--slash-complete)
+      (when-let* ((start (hermes-comint--input-start-pos)))
+        (when (and (< start (point))
+                   (string-match-p "[/~]"
+                                   (buffer-substring-no-properties
+                                    start (point))))
+          (comint-completion-at-point)))))
 
 (defun hermes-comint-bench--slash-complete ()
   "Slash-command CAPF for hermes comint input areas.
