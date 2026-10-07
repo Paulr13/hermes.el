@@ -467,6 +467,47 @@ popped — the user can later attach via `hermes' or `hermes-section'."
                 (buffer-local-value 'hermes--current-session-id buf)))
            (hermes-input--send-1 text)))))))
 
+;;;; M-x wrappers for useful gateway slashes
+;;
+;; Thin convenience commands that COMPOSE slash text and hand it to
+;; `hermes-send' — the gateway's own slash.exec pipeline renders the
+;; answer (worker output, dispatch directives, warnings).  Nothing
+;; here shadows a real gateway slash (see docs/16-slash-audit.md).
+;; `/save' grammar verified against the gateway registry
+;; (hermes_cli.session_export SAVE_USAGE): /save <format> [filename]
+;; [redact], formats json/md/html, redact = bare trailing keyword,
+;; filename reduced to a basename (the gateway ignores path parts).
+
+(defun hermes-usage ()
+  "Show the gateway's `/usage' report for the current session."
+  (interactive)
+  (hermes-send "/usage"))
+
+(defun hermes-model ()
+  "Run the gateway's `/model' slash (renders its listing/picker text).
+For interactive model switching with a live provider list prefer
+`hermes-set-model', which drives config RPCs directly."
+  (interactive)
+  (hermes-send "/model"))
+
+(defun hermes-save (format filename &optional redact)
+  "Export the current session via the gateway `/save' slash.
+FORMAT is completed over the gateway's formats (json, md, html).
+FILENAME, when non-empty, is the output name — reduced to its
+basename, since the gateway discards path separators; empty uses
+the gateway's auto-named file.  Prefix arg REDACT appends the
+`redact' keyword to scrub secrets from the export."
+  (interactive
+   (list (completing-read "Export format: " '("json" "md" "html")
+                          nil t nil nil "json")
+         (read-string "Output filename (RET for auto): ")
+         current-prefix-arg))
+  (hermes-send
+   (concat "/save " format
+           (and filename (not (string-empty-p filename))
+                (format " %s" (file-name-nondirectory filename)))
+           (when redact " redact"))))
+
 ;;;; Shell interpolation — !cmd and $(cmd)
 
 (defun hermes-input--shell-matches (text)

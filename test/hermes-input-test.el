@@ -456,5 +456,66 @@ when the new session hasn't been stamped yet, and stamps it."
      "sess-1" (current-buffer) hermes-input--slash-max-depth)
     (should (= 0 (length hermes-input-test--rpc-calls)))
     (should (string-match-p "use command.dispatch" (buffer-string)))))
+
+;;;; M-x wrappers for gateway slashes (hermes-usage / hermes-model / hermes-save)
+
+(ert-deftest hermes-input-test/mx-usage-sends-gateway-slash ()
+  "M-x hermes-usage composes `/usage' through the normal send path."
+  (hermes-input-test--with-buffer
+    (hermes-usage)
+    (let ((call (car hermes-input-test--rpc-calls)))
+      (should (equal "slash.exec" (car call)))
+      (should (equal "usage" (plist-get (cdr call) :command))))))
+
+(ert-deftest hermes-input-test/mx-model-sends-gateway-slash ()
+  "M-x hermes-model composes `/model' through the normal send path."
+  (hermes-input-test--with-buffer
+    (hermes-model)
+    (let ((call (car hermes-input-test--rpc-calls)))
+      (should (equal "slash.exec" (car call)))
+      (should (equal "model" (plist-get (cdr call) :command))))))
+
+(ert-deftest hermes-input-test/mx-save-composes-command ()
+  "`hermes-save' builds `/save <format> [filename] [redact]'.
+The filename is reduced to its basename; empty filename omits it;
+REDACT appends the bare keyword."
+  (let ((sent nil))
+    (cl-letf (((symbol-function 'hermes-send)
+               (lambda (text) (push text sent))))
+      (hermes-save "md" "notes.md" nil)
+      (should (equal '("/save md notes.md") sent))
+      (hermes-save "html" "/tmp/with dir/session.html" 'any)
+      (should (equal '("/save html session.html redact" "/save md notes.md") sent))
+      (hermes-save "json" "" nil)
+      (should (equal '("/save json"
+                       "/save html session.html redact"
+                       "/save md notes.md")
+                     sent)))))
+
+(ert-deftest hermes-input-test/mx-save-not-intercepted-reaches-slash-exec ()
+  "`/save' is a REAL gateway slash — the composed text must flow
+through `hermes-send' to `slash.exec' with no client-side shadow."
+  (hermes-input-test--with-buffer
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) "md"))
+              ((symbol-function 'read-string)
+               (lambda (&rest _) "notes.md")))
+      (let ((current-prefix-arg nil))
+        (call-interactively #'hermes-save)))
+    (let ((call (car hermes-input-test--rpc-calls)))
+      (should (equal "slash.exec" (car call)))
+      (should (equal "save md notes.md" (plist-get (cdr call) :command))))))
+
+(ert-deftest hermes-input-test/mx-save-interactive-prefix-redacts ()
+  "The interactive prefix arg appends the `redact' keyword."
+  (hermes-input-test--with-buffer
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) "html"))
+              ((symbol-function 'read-string)
+               (lambda (&rest _) "")))
+      (let ((current-prefix-arg '(4)))
+        (call-interactively #'hermes-save)))
+    (should (equal "save html redact"
+                   (plist-get (cdr (car hermes-input-test--rpc-calls)) :command)))))
 (provide 'hermes-input-test)
 ;;; hermes-input-test.el ends here
