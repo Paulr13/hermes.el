@@ -444,12 +444,13 @@ event exists); output arrives only at `tool.complete'."
 ;;;; Registration
 
 (hermes-tool--register "\\`Bash\\'"          #'hermes-tool-format-bash)
-;; Hermes agents name their shell tool `terminal'; the Claude-style
-;; names here never match it, so terminal calls fell to the generic
-;; formatter and showed neither the command nor a foldable body.
+;; Hermes agents name their shell tool `terminal' and their file tools
+;; `patch'/'write_file' (file_operations.py); the Claude-style names
+;; here never match them, so those calls fell to the generic formatter
+;; and showed neither the command/diff nor a foldable body.
 (hermes-tool--register "\\`terminal\\'"      #'hermes-tool-format-bash)
 (hermes-tool--register "\\`Read\\'"          #'hermes-tool-format-read)
-(hermes-tool--register "\\`\\(Edit\\|MultiEdit\\|Write\\)\\'"
+(hermes-tool--register "\\`\\(Edit\\|MultiEdit\\|Write\\|patch\\|write_file\\)\\'"
                        #'hermes-tool-format-edit)
 (hermes-tool--register "\\`\\(Grep\\|Glob\\)\\'"
                        #'hermes-tool-format-grep)

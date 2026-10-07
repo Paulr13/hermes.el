@@ -677,5 +677,185 @@ so approval / clarify / sudo prompts surface in bench-only sessions."
     (hermes-comint-test--with-buffer buf sid state
       (should (eq buf (hermes-prompts--session-buffer sid))))))
 
+;;;; Edit-tool diff → ediff
+
+(ert-deftest hermes-comint-test/diff-split-edit-pair ()
+  (should (equal (hermes-comint--diff-split "- old\n+ new")
+                 '("old" . "new"))))
+
+(ert-deftest hermes-comint-test/diff-split-context-headers-and-write ()
+  (let* ((unified "diff --git a/f b/f\nindex 1..2\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n ctx\n-removed\n+added\n\\ No newline at end of file")
+         (split (hermes-comint--diff-split unified)))
+    (should (equal (car split) "ctx\nremoved"))
+    (should (equal (cdr split) "ctx\nadded")))
+  ;; Write-tool style: whole file as + lines, empty before.
+  (let ((split (hermes-comint--diff-split "+line1\n+line2")))
+    (should (equal (car split) ""))
+    (should (equal (cdr split) "line1\nline2")))
+  ;; Blank lines inside a diff are skipped, not joined as content.
+  (should (equal (hermes-comint--diff-split "- a\n\n+ b") '("a" . "b"))))
+
+(ert-deftest hermes-comint-test/ediff-decision-no-path ()
+  (let ((d (hermes-comint--ediff-decision nil "- a\n+ b")))
+    (should-not (plist-get d :ok))
+    (should (string-match-p "no file path" (plist-get d :msg)))))
+
+(ert-deftest hermes-comint-test/ediff-decision-file-gone ()
+  (let ((d (hermes-comint--ediff-decision
+            "/nonexistent/hermes-ediff-probe.txt" "- a\n+ b")))
+    (should-not (plist-get d :ok))
+    (should (string-match-p "not on disk" (plist-get d :msg)))))
+
+(ert-deftest hermes-comint-test/ediff-decision-changed ()
+  (let* ((tmp (make-temp-file "hermes-ediff-"))
+         (d (progn (write-region "current content" nil tmp nil 'quiet)
+                   (hermes-comint--ediff-decision tmp "- old\n+ new"))))
+    (unwind-protect
+        (progn
+          (should-not (plist-get d :ok))
+          (should (string-match-p "changed since this edit" (plist-get d :msg))))
+      (delete-file tmp))))
+
+(ert-deftest hermes-comint-test/ediff-open-against-disk ()
+  "Matching file opens ediff: before buffer has old text, B visits the
+real file.  Missing/changed files message instead of opening."
+  (let* ((tmp (make-temp-file "hermes-ediff-"))
+         (opened nil))
+    (unwind-protect
+        (progn
+          (write-region "new" nil tmp nil 'quiet)
+          (cl-letf (((symbol-function 'ediff-buffers)
+                     (lambda (a b) (setq opened (list a b)))))
+            ;; Matching: disk == after.
+            (hermes-comint--ediff-open tmp "- old\n+ new")
+            (should (consp opened))
+            (should (bufferp (car opened)))
+            (should (equal "old"
+                           (with-current-buffer (car opened)
+                             (buffer-string))))
+            (should (equal tmp (buffer-file-name (cadr opened))))))
+      (when (and (consp opened) (buffer-live-p (car opened)))
+        (kill-buffer (car opened)))
+      (when (and (consp opened) (buffer-live-p (cadr opened)))
+        (kill-buffer (cadr opened)))
+      (ignore-errors (delete-file tmp)))))
+
+(ert-deftest hermes-comint-test/ediff-open-fallback-messages ()
+  "Changed file → no ediff session opened, fallback message printed."
+  (let* ((tmp (make-temp-file "hermes-ediff-"))
+         (opened nil))
+    (unwind-protect
+        (progn
+          (write-region "different" nil tmp nil 'quiet)
+          (cl-letf (((symbol-function 'ediff-buffers)
+                     (lambda (_a _b) (setq opened t)))
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (when (string-match-p
+                              "changed"
+                              (apply #'format fmt args))
+                         (setq opened 'msg)))))
+            (hermes-comint--ediff-open tmp "- old\n+ new")
+            (should (eq opened 'msg))))
+      (ignore-errors (delete-file tmp)))))
+
+(ert-deftest hermes-comint-test/diff-split-glue-no-oracle ()
+  "Without a disk oracle a glued `-old+new' line stays whole."
+  (should (equal (hermes-comint--diff-split "-alpha+beta")
+                 '("alpha+beta" . ""))))
+
+(ert-deftest hermes-comint-test/diff-split-glue-oracle-resolves ()
+  "With a disk oracle the glued line splits at the right boundary."
+  (should (equal (hermes-comint--diff-split "-alpha+beta" "beta")
+                 '("alpha" . "beta")))
+  ;; candidate choice matters: old `a+b' glued with new `ab' difflib-welds
+  ;; to `-a+b+ab'; the split must land at the second `+'
+  (should (equal (hermes-comint--diff-split "-a+b+ab" "ab")
+                 '("a+b" . "ab"))))
+
+(ert-deftest hermes-comint-test/diff-split-clean-ambiguous-keeps-whole ()
+  "A clean `-' line whose content contains `+' is never split."
+  (should (equal (hermes-comint--diff-split "- a + b\n+ x" "x")
+                 '("a + b" . "x"))))
+
+(ert-deftest hermes-comint-test/ediff-decision-glued-resolves ()
+  "A difflib-glued wire diff resolves against the real file content."
+  (let* ((tmp (make-temp-file "hermes-ediff-")))
+    (unwind-protect
+        (progn
+          (write-region "beta" nil tmp nil 'quiet)
+          (let* ((diff (concat "display.diff.review_header\n"
+                               "a" tmp " → b" tmp "\n"
+                               "@@ -1 +1 @@\n"
+                               "-alpha+beta"))
+                 (d (hermes-comint--ediff-decision tmp diff)))
+            (should (plist-get d :ok))
+            (should (equal "alpha" (plist-get d :before)))))
+      (ignore-errors (delete-file tmp)))))
+
+(ert-deftest hermes-comint-test/diff-tool-path-bare-context ()
+  "Bare-path context (gateway `patch' shape) resolves to itself."
+  (let ((tool (make-hermes-tool :id "t" :name "patch" :status 'complete
+                                :context "/tmp/hermes-bare-target.txt"
+                                :inline-diff "-a\n+b")))
+    (should (equal "/tmp/hermes-bare-target.txt"
+                   (hermes-comint--diff-tool-path tool)))))
+
+(ert-deftest hermes-comint-test/diff-tool-path-arrow-fallback ()
+  "No usable context: the path is harvested from the arrow line."
+  (let* ((tool (make-hermes-tool :id "t" :name "patch" :status 'complete
+                                 :context nil
+                                 :inline-diff
+                                 (concat "display.diff.review_header\n"
+                                         "a//tmp/x.txt → b//tmp/x.txt\n"
+                                         "@@ -1 +1 @@\n-a+b"))))
+    (should (equal "/tmp/x.txt" (hermes-comint--diff-tool-path tool)))))
+
+(ert-deftest hermes-comint-test/formatter-patch-registered ()
+  "Gateway file-tool names reach the edit formatter."
+  (should (eq (hermes-tool--lookup "patch") #'hermes-tool-format-edit))
+  (should (eq (hermes-tool--lookup "write_file") #'hermes-tool-format-edit)))
+
+(ert-deftest hermes-comint-test/tool-block-wires-diff-ret-keymap ()
+  "A complete edit tool with file_path + inline-diff gets a keymap
+property on the diff text whose RET opens ediff; tools without a path
+get none."
+  (let* ((tmp (make-temp-file "hermes-ediff-"))
+         (diff "- old\n+ new")
+         (tool (make-hermes-tool
+                :id "e1" :name "Edit" :status 'complete
+                :context (format "{\"file_path\":\"%s\"}" tmp)
+                :inline-diff diff)))
+    (unwind-protect
+        (progn
+          (write-region "new" nil tmp nil 'quiet)
+          (with-temp-buffer
+            (hermes-comint--insert-tool-block tool)
+            (goto-char (point-min))
+            (should (search-forward diff nil t))
+            (let ((km (get-text-property (1- (point)) 'keymap)))
+              (should km)
+              (should (lookup-key km (kbd "RET")))
+              ;; Drive the RET closure with ediff stubbed out.
+              (let ((opened nil))
+                (cl-letf (((symbol-function 'ediff-buffers)
+                           (lambda (a b) (setq opened (list a b)))))
+                  (call-interactively (lookup-key km (kbd "RET")))
+                  (should (consp opened))
+                  (should (equal "old"
+                                 (with-current-buffer (car opened)
+                                   (buffer-string)))))))
+            ;; No path in context → no keymap on the diff.
+            (let ((tool2 (make-hermes-tool
+                          :id "e2" :name "Edit" :status 'complete
+                          :context "{}"
+                          :inline-diff diff)))
+              (erase-buffer)
+              (hermes-comint--insert-tool-block tool2)
+              (goto-char (point-min))
+              (search-forward diff nil t)
+              (should-not (get-text-property (1- (point)) 'keymap)))))
+      (ignore-errors (delete-file tmp)))))
+
 (provide 'hermes-comint-test)
 ;;; hermes-comint-test.el ends here

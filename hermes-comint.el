@@ -36,6 +36,7 @@
 (declare-function hermes-image-clipboard-paste "hermes-image" ())
 (declare-function hermes-bg--list-for-sid "hermes-bg" (sid))
 (declare-function hermes-tool--truncate "hermes-tool-formatters" (s n))
+(declare-function ediff-buffers "ediff" (buffer-A buffer-B))
 (declare-function hermes--image-display-dims "hermes-org-render" (width height))
 
 (defvar hermes--last-gateway-ready)
@@ -524,7 +525,200 @@ copy commands are always allowed in the read-only history region."
       (let ((start (point)))
         (insert (hermes-comint--fontify-as-org body))
         (unless (bolp) (insert "\n"))
-        (add-text-properties start (point) '(line-prefix "  "))))))
+        (add-text-properties start (point) '(line-prefix "  "))
+        (hermes-comint--wire-diff-ediff tool start (point))))))
+
+;;;; Edit-tool diff → ediff
+
+(defun hermes-comint--diff-split (diff &optional disk)
+  "Reconstruct (BEFORE . AFTER) file texts from edit-tool DIFF text.
+`-' lines are old, `+' lines are new, and ` ' context lines are both;
+well-known unprefixed diff headers (diff --git / index / --- / +++ /
+@@ / \\\\ No newline) are skipped.  One marker character and one
+following space are stripped from kept lines.  Content lines that
+themselves start with the header sequences are an unavoidable
+ambiguity of prefix-only parsing (no hunk state).
+
+The gateway's difflib renders an edit of a file whose last line lacks
+a trailing newline with the final old line GLUED to the first new
+line (`-old+new' on one wire line).  Such an ambiguous `-' line is
+left whole by default; with the optional DISK content supplied, each
+`+' inside the glued line is tried as the old/new boundary and the
+first split whose AFTER side matches DISK wins."
+  (let ((before nil) (after nil) glue glue-b glue-a)
+    (dolist (line (split-string (or diff "") "\n"))
+      (cond
+       ((string-empty-p line) nil)
+       ((string-match-p "\\`\\(diff \\|index \\|--- \\|\\+\\+\\+ \\|@@\\|\\\\\\)" line)
+        nil)
+       ((string-prefix-p "+" line)
+        (push (string-remove-prefix
+               (if (string-prefix-p "+ " line) "+ " "+") line) after))
+       ((string-prefix-p "-" line)
+        (let ((c (string-remove-prefix
+                  (if (string-prefix-p "- " line) "- " "-") line)))
+          (when (and (null glue) (string-match-p "\\+" c))
+            (setq glue c
+                  glue-b (length before)
+                  glue-a (length after)))
+          (push c before)))
+       ((string-prefix-p " " line)
+        (let ((s (string-remove-prefix " " line)))
+          (push s after)
+          (push s before)))
+       (t nil)))
+    (let ((res (cons (mapconcat #'identity (nreverse before) "\n")
+                     (mapconcat #'identity (nreverse after) "\n"))))
+      (if (and disk glue)
+          (or (when (equal (string-trim-right (cdr res))
+                           (string-trim-right disk))
+                res)
+              (hermes-comint--diff-split-glue
+               before after glue glue-b glue-a disk)
+              res)
+        res))))
+
+(defun hermes-comint--list-replace (list idx val)
+  "Return a copy of LIST with its IDXth element set to VAL."
+  (let ((out (copy-sequence list)))
+    (setcar (nthcdr idx out) val)
+    out))
+
+(defun hermes-comint--list-insert (list idx val)
+  "Return a copy of LIST with VAL inserted at index IDX."
+  (if (zerop idx)
+      (cons val list)
+    (let ((out (copy-sequence list)))
+      (setcdr (nthcdr (1- idx) out) (cons val (nthcdr idx list)))
+      out)))
+
+(defun hermes-comint--diff-split-glue (before after glue glue-b glue-a disk)
+  "Try each `+' in GLUE as the old/new boundary against DISK.
+BEFORE/AFTER are the wire-ordered content lists with GLUE sitting at
+index GLUE-B in BEFORE and its tail due at index GLUE-A in AFTER.
+Return the first (BEFORE-TEXT . AFTER-TEXT) whose AFTER side matches
+DISK, or nil when no boundary fits."
+  (let ((b (nreverse (copy-sequence before)))
+        (a (nreverse (copy-sequence after)))
+        (target (string-trim-right disk))
+        (pos 0)
+        hit)
+    (while (and (null hit)
+                (setq pos (string-match "\\+" glue pos)))
+      (let* ((before2 (hermes-comint--list-replace
+                       b glue-b (substring glue 0 pos)))
+             (after2 (hermes-comint--list-insert
+                      a glue-a (substring glue (1+ pos))))
+             (cand (cons (mapconcat #'identity before2 "\n")
+                         (mapconcat #'identity after2 "\n"))))
+        (when (equal (string-trim-right (cdr cand)) target)
+          (setq hit cand)))
+      (setq pos (1+ pos)))
+    hit))
+
+(defun hermes-comint--file-text (path)
+  "Return PATH's on-disk content as a string (trailing newlines trimmed)."
+  (with-temp-buffer
+    (insert-file-contents path)
+    (string-trim-right (buffer-string))))
+
+(defun hermes-comint--ediff-decision (path diff)
+  "Decide whether RET-on-diff may open ediff for edit-tool PATH/DIFF.
+Return (:ok t :before STRING) when PATH exists, is readable, and its
+on-disk content equals the AFTER reconstruction from DIFF — otherwise
+(:ok nil :msg REASON) for the graceful fallback (no file path in the
+tool context, file gone, unreadable, empty diff, or changed on disk
+since this edit)."
+  (cond ((or (null path) (string-empty-p path))
+         (list :ok nil :msg "no file path in the tool context"))
+        ((not (file-exists-p path))
+         (list :ok nil :msg (format "%s is not on disk anymore" path)))
+        ((not (file-readable-p path))
+         (list :ok nil :msg (format "%s is not readable" path)))
+        ((or (null diff) (string-empty-p (string-trim-right diff)))
+         (list :ok nil :msg "no diff content"))
+        (t
+         (let* ((disk (hermes-comint--file-text path))
+                (split (hermes-comint--diff-split diff disk))
+                (after (string-trim-right (cdr split))))
+           (if (equal after disk)
+               (list :ok t :before (car split))
+             (list :ok nil
+                   :msg (format "%s changed since this edit; not opening ediff"
+                                path)))))))
+
+(defun hermes-comint--ediff-open (path diff)
+  "Open a standard ediff session for an edit-tool diff.
+Buffer A holds the BEFORE content reconstructed from DIFF, buffer B
+visits the real file PATH on disk.  When the file is missing, changed,
+or the diff has no usable path, message the fallback reason instead."
+  (let ((d (hermes-comint--ediff-decision path diff)))
+    (if (plist-get d :ok)
+        (let* ((before (generate-new-buffer
+                        (format " *hermes-before-%s*"
+                                (file-name-nondirectory path))))
+               (disk (find-file-noselect path)))
+          (with-current-buffer before
+            (insert (plist-get d :before))
+            (goto-char (point-min)))
+          (ediff-buffers before disk))
+      (message "hermes: %s" (plist-get d :msg)))))
+
+(defun hermes-comint--diff-arrow-path (diff)
+  "Harvest the target path from DIFF's rendered `a/x → b/x' line.
+The gateway renders the unified-diff fromfile/tofile pair as one
+wire line, so it is a last-resort path source when the tool context
+carries nothing usable."
+  (when (stringp diff)
+    (let ((hit nil))
+      (dolist (line (split-string diff "\n"))
+        (unless hit
+          (when (string-match "\\`a/\\(.*\\) → b/\\(.*\\)\\'" line)
+            (setq hit (match-string 2 line)))))
+      hit)))
+
+(defun hermes-comint--diff-tool-path (tool)
+  "Best-effort target file PATH for TOOL's inline diff.
+The gateway sends the `patch'/`write_file' context as a bare path
+string (the truncated start preview), so JSON context keys are
+tried first, then a bare-path-looking raw context, then the
+rendered diff's `a/x → b/x' header line."
+  (or (hermes-tool--ctx-get
+       (hermes-tool--parse-context (hermes-tool-context tool))
+       'file_path 'path 'file)
+      (let ((c (hermes-tool-context tool)))
+        (and (stringp c)
+             (> (length c) 0)
+             (string-match-p "\\`[/~]" c)
+             (not (string-match-p "[\n \t]" c))
+             c))
+      (hermes-comint--diff-arrow-path (hermes-tool-inline-diff tool))))
+
+(defun hermes-comint--wire-diff-ediff (tool beg end)
+  "Bind RET on TOOL's diff region inside [BEG,END) to open ediff.
+Locates the literal inline-diff text in the just-inserted body and
+attaches a `keymap' property (same mechanism as image spans) whose
+RET closure captures the tool's file path and diff.  No-op when the
+tool carries no inline diff or no file path can be resolved."
+  (let ((diff (hermes-tool-inline-diff tool)))
+    (when (and diff (> (length (string-trim-right diff)) 0))
+      (let ((path (hermes-comint--diff-tool-path tool)))
+        (when path
+          (save-excursion
+            (goto-char beg)
+            (let (hit-b hit-e)
+              (while (search-forward diff end t)
+                (setq hit-b (match-beginning 0)
+                      hit-e (match-end 0)))
+              (when hit-b
+                (let ((km (make-sparse-keymap))
+                      (p path)
+                      (d diff))
+                  (define-key km (kbd "RET")
+                    (lambda ()
+                      (interactive)
+                      (hermes-comint--ediff-open p d)))
+                  (put-text-property hit-b hit-e 'keymap km))))))))))
 
 (defun hermes-comint--insert-subagent-block (sa)
   (let* ((goal (or (hermes-subagent-goal sa) "subagent"))
